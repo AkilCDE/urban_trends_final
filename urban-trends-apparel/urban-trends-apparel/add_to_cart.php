@@ -14,7 +14,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $quantity = $_POST['quantity'] ?? 1;
     
     // Validate product exists
-    $product = $db->prepare("SELECT * FROM products WHERE id = ?");
+    $product = $db->prepare("SELECT * FROM products WHERE product_id = ?");
     $product->execute([$product_id]);
     $product = $product->fetch(PDO::FETCH_ASSOC);
     

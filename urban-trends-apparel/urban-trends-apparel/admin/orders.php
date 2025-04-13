@@ -1,10 +1,8 @@
 <?php
-
 define('DB_HOST', 'localhost');
 define('DB_USER', 'root');
 define('DB_PASS', '');
 define('DB_NAME', 'urban_trends');
-
 
 try {
     $db = new PDO("mysql:host=".DB_HOST.";dbname=".DB_NAME, DB_USER, DB_PASS);
@@ -13,19 +11,15 @@ try {
     die("Connection failed: " . $e->getMessage());
 }
 
-
 session_start();
-
 
 error_reporting(E_ALL);
 ini_set('display_errors', 1);
 
-
-if (!isset($_SESSION['user_id']) || !isset($_SESSION['is_admin']) || $_SESSION['is_admin'] != 1) {
+if (!isset($_SESSION['user_id'])) {
     header("Location: ../login.php");
     exit;
 }
-
 
 class OrderDelivery {
     private $db;
@@ -36,14 +30,12 @@ class OrderDelivery {
 
     public function updateOrderStatus($order_id, $status, $notes = null) {
         try {
-            // Validate status
             $valid_statuses = ['pending', 'processing', 'shipped', 'delivered', 'cancelled', 'return_requested', 'returned', 'refunded'];
             if (!in_array($status, $valid_statuses)) {
                 throw new Exception("Invalid status provided");
             }
             
-            // Get current status first
-            $stmt = $this->db->prepare("SELECT status FROM orders WHERE id = ?");
+            $stmt = $this->db->prepare("SELECT status FROM orders WHERE order_id = ?");
             $stmt->execute([$order_id]);
             $current_status = $stmt->fetchColumn();
             
@@ -51,7 +43,6 @@ class OrderDelivery {
                 throw new Exception("Order not found");
             }
             
-            // Prevent invalid status transitions
             if ($current_status == 'cancelled' && $status != 'cancelled') {
                 throw new Exception("Cannot change status from cancelled");
             }
@@ -60,24 +51,20 @@ class OrderDelivery {
                 throw new Exception("Cannot change status from delivered");
             }
             
-            // Update order status
-            $stmt = $this->db->prepare("UPDATE orders SET status = ? WHERE id = ?");
+            $stmt = $this->db->prepare("UPDATE orders SET status = ? WHERE order_id = ?");
             $stmt->execute([$status, $order_id]);
             
-            // Record status change in history
             $this->recordStatusHistory($order_id, $status, $notes);
             
-            // Update shipping status if needed
             if ($status == 'shipped' || $status == 'delivered') {
                 $shipping_status = $status == 'shipped' ? 'shipped' : 'delivered';
                 $this->updateShippingStatus($order_id, $shipping_status);
             }
             
-            // Get order details for notification
-            $stmt = $this->db->prepare("SELECT u.email, u.firstname, o.id as order_number 
+            $stmt = $this->db->prepare("SELECT u.email, u.firstname, o.order_id as order_number 
                                       FROM orders o 
-                                      JOIN users u ON o.user_id = u.id 
-                                      WHERE o.id = ?");
+                                      JOIN users u ON o.user_id = u.user_id 
+                                      WHERE o.order_id = ?");
             $stmt->execute([$order_id]);
             $order = $stmt->fetch(PDO::FETCH_ASSOC);
             
@@ -95,9 +82,6 @@ class OrderDelivery {
         }
     }
     
-    /**
-     * Update shipping status
-     */
     private function updateShippingStatus($order_id, $status) {
         try {
             $stmt = $this->db->prepare("UPDATE shipping SET status = ?, updated_at = NOW() WHERE order_id = ?");
@@ -108,9 +92,6 @@ class OrderDelivery {
         }
     }
     
-    /**
-     * Record status change in history
-     */
     private function recordStatusHistory($order_id, $status, $notes = null) {
         try {
             $stmt = $this->db->prepare("INSERT INTO order_status_history (order_id, status, notes) VALUES (?, ?, ?)");
@@ -121,9 +102,6 @@ class OrderDelivery {
         }
     }
     
-    /**
-     * Send email notification for order status update
-     */
     private function sendStatusNotification($email, $name, $order_number, $status) {
         $subject = "Order #$order_number Status Update";
         $status_text = ucwords(str_replace('_', ' ', $status));
@@ -174,27 +152,21 @@ class OrderDelivery {
                     </p>
                 </div>
                 <div class='footer'>
-                    <p>Urban Trends Apparel &copy; " . date('Y') . "</p>
+                    <p>Urban Trends Apparel © " . date('Y') . "</p>
                 </div>
             </div>
         </body>
         </html>";
         
-        // Headers for HTML email
         $headers = "MIME-Version: 1.0" . "\r\n";
         $headers .= "Content-type:text/html;charset=UTF-8" . "\r\n";
         $headers .= "From: Urban Trends <no-reply@urbantrends.com>" . "\r\n";
         
-        // Send email
         return mail($email, $subject, $message, $headers);
     }
     
-    /**
-     * Schedule delivery for an order
-     */
     public function scheduleDelivery($order_id, $delivery_data) {
         try {
-            // Validate input
             if (!is_numeric($order_id) || $order_id <= 0) {
                 throw new Exception("Invalid order ID");
             }
@@ -214,13 +186,11 @@ class OrderDelivery {
                 }
             }
             
-            // Check if shipping record exists
-            $stmt = $this->db->prepare("SELECT id FROM shipping WHERE order_id = ?");
+            $stmt = $this->db->prepare("SELECT shipping_id FROM shipping WHERE order_id = ?");
             $stmt->execute([$order_id]);
             $shipping_id = $stmt->fetchColumn();
             
             if ($shipping_id) {
-                // Update existing shipping record
                 $stmt = $this->db->prepare("UPDATE shipping SET 
                                            pickup_location = ?,
                                            estimated_delivery = ?,
@@ -239,7 +209,6 @@ class OrderDelivery {
                     $order_id
                 ]);
             } else {
-                // Create new shipping record
                 $stmt = $this->db->prepare("INSERT INTO shipping 
                                            (order_id, pickup_location, estimated_delivery, carrier, tracking_number, shipping_method, status)
                                            VALUES (?, ?, ?, ?, ?, ?, 'processing')");
@@ -253,10 +222,8 @@ class OrderDelivery {
                 ]);
             }
             
-            // Update order status to processing if it's pending
             $this->updateOrderStatus($order_id, 'processing', 'Delivery scheduled');
             
-            // If pickup, send pickup instructions
             if ($is_pickup) {
                 $this->sendPickupInstructions($order_id);
             }
@@ -271,15 +238,12 @@ class OrderDelivery {
         }
     }
     
-    /**
-     * Send pickup instructions to customer
-     */
     private function sendPickupInstructions($order_id) {
-        $stmt = $this->db->prepare("SELECT u.email, u.firstname, o.id as order_number, s.pickup_location
+        $stmt = $this->db->prepare("SELECT u.email, u.firstname, o.order_id as order_number, s.pickup_location
                                   FROM orders o 
-                                  JOIN users u ON o.user_id = u.id
-                                  JOIN shipping s ON o.id = s.order_id
-                                  WHERE o.id = ?");
+                                  JOIN users u ON o.user_id = u.user_id
+                                  JOIN shipping s ON o.order_id = s.order_id
+                                  WHERE o.order_id = ?");
         $stmt->execute([$order_id]);
         $order = $stmt->fetch(PDO::FETCH_ASSOC);
         
@@ -322,7 +286,7 @@ class OrderDelivery {
                         </p>
                     </div>
                     <div class='footer'>
-                        <p>Urban Trends Apparel &copy; " . date('Y') . "</p>
+                        <p>Urban Trends Apparel © " . date('Y') . "</p>
                     </div>
                 </div>
             </body>
@@ -337,9 +301,6 @@ class OrderDelivery {
         return false;
     }
     
-    /**
-     * Get order status history
-     */
     public function getOrderStatusHistory($order_id) {
         try {
             $stmt = $this->db->prepare("SELECT status, changed_at as updated_at, notes
@@ -354,18 +315,15 @@ class OrderDelivery {
         }
     }
     
-    /**
-     * Get all orders with filters
-     */
     public function getAllOrders($status = null, $date_from = null, $date_to = null) {
         try {
             $query = "SELECT o.*, u.email, u.firstname, u.lastname, 
                      s.pickup_location, s.estimated_delivery, s.carrier, s.tracking_number,
                      p.payment_method, p.status as payment_status
                      FROM orders o 
-                     JOIN users u ON o.user_id = u.id
-                     LEFT JOIN shipping s ON o.id = s.order_id
-                     LEFT JOIN payments p ON o.id = p.order_id";
+                     JOIN users u ON o.user_id = u.user_id
+                     LEFT JOIN shipping s ON o.order_id = s.order_id
+                     LEFT JOIN payments p ON o.order_id = p.order_id";
             
             $conditions = [];
             $params = [];
@@ -400,21 +358,19 @@ class OrderDelivery {
         }
     }
     
-    /**
-     * Get order details with items
-     */
     public function getOrderDetails($order_id) {
         try {
-            // Get order info
             $stmt = $this->db->prepare("SELECT o.*, u.email, u.firstname, u.lastname, u.address, u.phone,
                                       s.tracking_number, s.carrier, s.shipping_method, s.estimated_delivery, 
                                       s.actual_delivery, s.pickup_location, s.status as shipping_status,
-                                      p.payment_method, p.status as payment_status, p.transaction_id
+                                      p.payment_method, p.status as payment_status, p.transaction_id,
+                                      ds.preferred_date, ds.preferred_time_slot, ds.pickup_option, ds.pickup_location as customer_pickup_location
                                       FROM orders o 
-                                      JOIN users u ON o.user_id = u.id
-                                      LEFT JOIN shipping s ON o.id = s.order_id
-                                      LEFT JOIN payments p ON o.id = p.order_id
-                                      WHERE o.id = ?");
+                                      JOIN users u ON o.user_id = u.user_id
+                                      LEFT JOIN shipping s ON o.order_id = s.order_id
+                                      LEFT JOIN payments p ON o.order_id = p.order_id
+                                      LEFT JOIN delivery_schedules ds ON o.order_id = ds.order_id
+                                      WHERE o.order_id = ?");
             $stmt->execute([$order_id]);
             $order = $stmt->fetch(PDO::FETCH_ASSOC);
             
@@ -422,20 +378,24 @@ class OrderDelivery {
                 return null;
             }
             
-            // Set default values
             $order['is_pickup'] = !empty($order['pickup_location']) ? 1 : 0;
             $order['delivery_date'] = $order['estimated_delivery'] ?? null;
             $order['delivery_time'] = null;
             
-            // Get order items
-            $stmt = $this->db->prepare("SELECT oi.*, p.name, p.image, p.price as unit_price
+            if (!empty($order['preferred_date'])) {
+                $order['customer_preferred_date'] = $order['preferred_date'];
+                $order['customer_preferred_time'] = $order['preferred_time_slot'];
+                $order['is_customer_pickup'] = $order['pickup_option'];
+            }
+            
+            $stmt = $this->db->prepare("SELECT oi.*, p.name, p.image, (p.price + COALESCE(pv.price_adjustment, 0)) as unit_price, pv.size
                                       FROM order_items oi
-                                      JOIN products p ON oi.product_id = p.id
+                                      JOIN products p ON oi.product_id = p.product_id
+                                      LEFT JOIN product_variations pv ON oi.variation_id = pv.variation_id
                                       WHERE oi.order_id = ?");
             $stmt->execute([$order_id]);
             $order['items'] = $stmt->fetchAll(PDO::FETCH_ASSOC);
             
-            // Calculate total from items if needed
             if (empty($order['total_amount']) && !empty($order['items'])) {
                 $total = 0;
                 foreach ($order['items'] as $item) {
@@ -444,7 +404,6 @@ class OrderDelivery {
                 $order['total_amount'] = $total;
             }
             
-            // Get status history
             $order['status_history'] = $this->getOrderStatusHistory($order_id);
             
             return $order;
@@ -454,12 +413,8 @@ class OrderDelivery {
         }
     }
     
-    /**
-     * Update payment information
-     */
     public function updatePayment($order_id, $payment_data) {
         try {
-            // Validate input
             if (!is_numeric($order_id) || $order_id <= 0) {
                 throw new Exception("Invalid order ID");
             }
@@ -472,8 +427,7 @@ class OrderDelivery {
                 throw new Exception("Payment status is required");
             }
 
-            // Get order total amount
-            $stmt = $this->db->prepare("SELECT total_amount FROM orders WHERE id = ?");
+            $stmt = $this->db->prepare("SELECT total_amount FROM orders WHERE order_id = ?");
             $stmt->execute([$order_id]);
             $amount = $stmt->fetchColumn();
 
@@ -481,13 +435,11 @@ class OrderDelivery {
                 throw new Exception("Order not found");
             }
 
-            // Check if payment record exists
-            $stmt = $this->db->prepare("SELECT id FROM payments WHERE order_id = ?");
+            $stmt = $this->db->prepare("SELECT payment_id FROM payments WHERE order_id = ?");
             $stmt->execute([$order_id]);
             $payment_exists = $stmt->fetchColumn();
 
             if ($payment_exists) {
-                // Update existing payment
                 $stmt = $this->db->prepare("UPDATE payments SET 
                                           payment_method = ?,
                                           status = ?,
@@ -501,7 +453,6 @@ class OrderDelivery {
                     $order_id
                 ]);
             } else {
-                // Create new payment record
                 $stmt = $this->db->prepare("INSERT INTO payments 
                                           (order_id, amount, payment_method, status, transaction_id, payment_date)
                                           VALUES (?, ?, ?, ?, ?, NOW())");
@@ -518,7 +469,6 @@ class OrderDelivery {
                 throw new Exception("Failed to update payment in database");
             }
 
-            // Update order status if payment is completed
             if ($payment_data['status'] == 'completed') {
                 $this->updateOrderStatus($order_id, 'processing', 'Payment completed');
             }
@@ -532,15 +482,61 @@ class OrderDelivery {
             throw $e;
         }
     }
+
+    public function getDeliverySchedule($order_id) {
+        try {
+            $stmt = $this->db->prepare("SELECT * FROM delivery_schedules WHERE order_id = ?");
+            $stmt->execute([$order_id]);
+            return $stmt->fetch(PDO::FETCH_ASSOC);
+        } catch(PDOException $e) {
+            error_log("Error getting delivery schedule: " . $e->getMessage());
+            return null;
+        }
+    }
+
+    public function updateDeliverySchedule($order_id, $delivery_data) {
+        try {
+            $stmt = $this->db->prepare("SELECT delivery_schedule_id FROM delivery_schedules WHERE order_id = ?");
+            $stmt->execute([$order_id]);
+            $exists = $stmt->fetchColumn();
+            
+            if ($exists) {
+                $stmt = $this->db->prepare("UPDATE delivery_schedules SET 
+                                          preferred_date = ?,
+                                          preferred_time_slot = ?,
+                                          pickup_option = ?,
+                                          pickup_location = ?
+                                          WHERE order_id = ?");
+                return $stmt->execute([
+                    $delivery_data['preferred_date'] ?? null,
+                    $delivery_data['preferred_time_slot'] ?? null,
+                    $delivery_data['pickup_option'] ?? 0,
+                    $delivery_data['pickup_location'] ?? null,
+                    $order_id
+                ]);
+            } else {
+                $stmt = $this->db->prepare("INSERT INTO delivery_schedules 
+                                          (order_id, preferred_date, preferred_time_slot, pickup_option, pickup_location)
+                                          VALUES (?, ?, ?, ?, ?)");
+                return $stmt->execute([
+                    $order_id,
+                    $delivery_data['preferred_date'] ?? null,
+                    $delivery_data['preferred_time_slot'] ?? null,
+                    $delivery_data['pickup_option'] ?? 0,
+                    $delivery_data['pickup_location'] ?? null
+                ]);
+            }
+        } catch(PDOException $e) {
+            error_log("Error updating delivery schedule: " . $e->getMessage());
+            return false;
+        }
+    }
 }
 
-// Initialize OrderDelivery
 $orderDelivery = new OrderDelivery($db);
 
-// Handle form submissions
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     try {
-        // Update order status
         if (isset($_POST['update_status'])) {
             $order_id = (int)$_POST['order_id'];
             $status = $_POST['status'];
@@ -551,7 +547,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
         }
         
-        // Schedule delivery
         if (isset($_POST['schedule_delivery'])) {
             $order_id = (int)$_POST['order_id'];
             $is_pickup = isset($_POST['is_pickup']) ? 1 : 0;
@@ -569,7 +564,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
         }
         
-        // Update payment
         if (isset($_POST['update_payment'])) {
             $order_id = (int)$_POST['order_id'];
             
@@ -592,7 +586,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     exit;
 }
 
-// Get order details if viewing single order
 $order = null;
 if (isset($_GET['id'])) {
     $order = $orderDelivery->getOrderDetails($_GET['id']);
@@ -603,20 +596,24 @@ if (isset($_GET['id'])) {
     }
 }
 
-// Get all orders with filters
 $status_filter = $_GET['status'] ?? null;
 $date_from = $_GET['date_from'] ?? null;
 $date_to = $_GET['date_to'] ?? null;
 
 $orders = $orderDelivery->getAllOrders($status_filter, $date_from, $date_to);
 
-// Handle logout
 if (isset($_GET['logout'])) {
     session_unset();
     session_destroy();
     header("Location: ../login.php");
     exit;
 }
+
+$time_slot_map = [
+    'morning' => 'Morning (8AM-12PM)',
+    'afternoon' => 'Afternoon (1PM-5PM)',
+    'evening' => 'Evening (6PM-9PM)'
+];
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -652,7 +649,6 @@ if (isset($_GET['logout'])) {
             min-height: 100vh;
         }
         
-        /* Sidebar Styles */
         .admin-sidebar {
             width: var(--sidebar-width);
             background-color: var(--dark-color);
@@ -709,7 +705,6 @@ if (isset($_GET['logout'])) {
             text-align: center;
         }
         
-        /* Main Content Styles */
         .admin-main {
             flex: 1;
             margin-left: var(--sidebar-width);
@@ -755,7 +750,6 @@ if (isset($_GET['logout'])) {
             margin-right: 5px;
         }
         
-        /* Alerts */
         .alert {
             padding: 12px 15px;
             border-radius: 4px;
@@ -775,7 +769,12 @@ if (isset($_GET['logout'])) {
             border: 1px solid #f5c6cb;
         }
         
-        /* Tables */
+        .alert-info {
+            background-color: #d1ecf1;
+            color: #0c5460;
+            border: 1px solid #bee5eb;
+        }
+        
         .table-container {
             background-color: white;
             border-radius: 8px;
@@ -847,7 +846,6 @@ if (isset($_GET['logout'])) {
             color: #383D41;
         }
         
-        /* Payment Status */
         .payment-status {
             padding: 3px 8px;
             border-radius: 4px;
@@ -875,7 +873,6 @@ if (isset($_GET['logout'])) {
             color: #383D41;
         }
         
-        /* Buttons */
         .btn {
             padding: 8px 16px;
             border-radius: 4px;
@@ -933,7 +930,6 @@ if (isset($_GET['logout'])) {
             font-size: 0.8rem;
         }
         
-        /* Forms */
         .form-group {
             margin-bottom: 15px;
         }
@@ -963,7 +959,6 @@ if (isset($_GET['logout'])) {
             resize: vertical;
         }
         
-        /* Order Details */
         .order-details {
             background-color: white;
             border-radius: 8px;
@@ -996,6 +991,15 @@ if (isset($_GET['logout'])) {
             background-color: #f8f9fa;
             padding: 15px;
             border-radius: 6px;
+        }
+        
+        .customer-preferred {
+            border: 1px solid #4361ee;
+            background-color: rgba(67, 97, 238, 0.05);
+        }
+        
+        .customer-preferred h4 {
+            color: #4361ee;
         }
         
         .order-meta-item h4 {
@@ -1077,7 +1081,6 @@ if (isset($_GET['logout'])) {
             border-top: 1px solid #eee;
         }
         
-        /* Status History */
         .status-history {
             margin-top: 30px;
         }
@@ -1131,7 +1134,6 @@ if (isset($_GET['logout'])) {
             margin-top: 5px;
         }
         
-        /* Filters */
         .filters {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
@@ -1143,7 +1145,6 @@ if (isset($_GET['logout'])) {
             box-shadow: 0 2px 10px rgba(0,0,0,0.05);
         }
         
-        /* Delivery Scheduling */
         .delivery-schedule, .payment-update, .status-update {
             background-color: white;
             border-radius: 8px;
@@ -1157,7 +1158,6 @@ if (isset($_GET['logout'])) {
             color: var(--dark-color);
         }
         
-        /* Responsive Styles */
         @media (max-width: 768px) {
             .admin-sidebar {
                 width: 70px;
@@ -1252,7 +1252,7 @@ if (isset($_GET['logout'])) {
     <!-- Main Content -->
     <div class="admin-main">
         <div class="admin-header">
-            <h2><i class="fas fa-shopping-bag"></i> <?php echo isset($order) ? "Order #" . $order['id'] : "Order Management"; ?></h2>
+            <h2><i class="fas fa-shopping-bag"></i> <?php echo isset($order) ? "Order #" . $order['order_id'] : "Order Management"; ?></h2>
             <div class="admin-actions">
                 <a href="../index.php"><i class="fas fa-home"></i> View Site</a>
                 <a href="?logout=1"><i class="fas fa-sign-out-alt"></i> Logout</a>
@@ -1296,10 +1296,26 @@ if (isset($_GET['logout'])) {
                         <p><?php echo nl2br(htmlspecialchars($order['address'])); ?></p>
                     </div>
                     
+                    <?php if (!empty($order['customer_preferred_date'])): ?>
+                    <div class="order-meta-item customer-preferred">
+                        <h4>Customer's Preferred Delivery</h4>
+                        <?php if ($order['is_customer_pickup']): ?>
+                            <p><strong>Type:</strong> Customer Pickup</p>
+                            <?php if (!empty($order['customer_pickup_location'])): ?>
+                                <p><strong>Pickup Location:</strong> <?php echo htmlspecialchars($order['customer_pickup_location']); ?></p>
+                            <?php endif; ?>
+                        <?php else: ?>
+                            <p><strong>Type:</strong> Delivery</p>
+                            <p><strong>Preferred Date:</strong> <?php echo date('M d, Y', strtotime($order['customer_preferred_date'])); ?></p>
+                            <p><strong>Time Slot:</strong> <?php echo $time_slot_map[$order['customer_preferred_time']] ?? ucfirst($order['customer_preferred_time']); ?></p>
+                        <?php endif; ?>
+                    </div>
+                    <?php endif; ?>
+                    
                     <div class="order-meta-item">
                         <h4>Order Information</h4>
                         <p><strong>Date:</strong> <?php echo date('M d, Y H:i', strtotime($order['order_date'])); ?></p>
-                        <p><strong>Number:</strong> <?php echo $order['id']; ?></p>
+                        <p><strong>Number:</strong> <?php echo $order['order_id']; ?></p>
                         <p><strong>Payment:</strong> 
                             <?php if (!empty($order['payment_method'])): ?>
                                 <?php echo ucwords(str_replace('_', ' ', $order['payment_method'])); ?>
@@ -1352,11 +1368,12 @@ if (isset($_GET['logout'])) {
                             <div class="order-item-details">
                                 <div class="order-item-name"><?php echo htmlspecialchars($item['name']); ?></div>
                                 <div class="order-item-meta">
-                                    Quantity: <?php echo $item['quantity']; ?> × $<?php echo number_format($item['unit_price'], 2); ?>
+                                    Size: <?php echo htmlspecialchars($item['size'] ?? 'N/A'); ?>,
+                                    Quantity: <?php echo $item['quantity']; ?> × ₱<?php echo number_format($item['unit_price'], 2); ?>
                                 </div>
                             </div>
                             <div class="order-item-price">
-                                $<?php echo number_format($item['quantity'] * $item['price'], 2); ?>
+                                ₱<?php echo number_format($item['quantity'] * $item['price'], 2); ?>
                             </div>
                         </div>
                     <?php endforeach; ?>
@@ -1365,15 +1382,15 @@ if (isset($_GET['logout'])) {
                 <div class="order-summary">
                     <div class="order-summary-row">
                         <span>Subtotal:</span>
-                        <span>$<?php echo number_format($order['total_amount'], 2); ?></span>
+                        <span>₱<?php echo number_format($order['total_amount'] - 500, 2); ?></span>
                     </div>
                     <div class="order-summary-row">
                         <span>Shipping:</span>
-                        <span>$0.00</span>
+                        <span>₱500.00</span>
                     </div>
                     <div class="order-summary-row total">
                         <span>Total:</span>
-                        <span>$<?php echo number_format($order['total_amount'], 2); ?></span>
+                        <span>₱<?php echo number_format($order['total_amount'], 2); ?></span>
                     </div>
                 </div>
                 
@@ -1381,7 +1398,7 @@ if (isset($_GET['logout'])) {
                 <div class="payment-update">
                     <h4>Update Payment Information</h4>
                     <form method="POST">
-                        <input type="hidden" name="order_id" value="<?php echo $order['id']; ?>">
+                        <input type="hidden" name="order_id" value="<?php echo $order['order_id']; ?>">
                         
                         <div class="form-group">
                             <label for="payment_method">Payment Method</label>
@@ -1423,7 +1440,7 @@ if (isset($_GET['logout'])) {
                 <div class="status-update">
                     <h4>Update Order Status</h4>
                     <form method="POST">
-                        <input type="hidden" name="order_id" value="<?php echo $order['id']; ?>">
+                        <input type="hidden" name="order_id" value="<?php echo $order['order_id']; ?>">
                         
                         <div class="form-group">
                             <label for="status">Status</label>
@@ -1454,8 +1471,20 @@ if (isset($_GET['logout'])) {
                 <?php if ($order['status'] != 'cancelled' && $order['status'] != 'delivered'): ?>
                     <div class="delivery-schedule">
                         <h4>Schedule Delivery</h4>
+                        <?php if (!empty($order['customer_preferred_date'])): ?>
+                            <div class="alert alert-info" style="margin-bottom: 20px;">
+                                <i class="fas fa-info-circle"></i> Customer requested:
+                                <?php if ($order['is_customer_pickup']): ?>
+                                    Pickup at <?php echo htmlspecialchars($order['customer_pickup_location']); ?>
+                                <?php else: ?>
+                                    Delivery on <?php echo date('M d, Y', strtotime($order['customer_preferred_date'])); ?> 
+                                    (<?php echo $time_slot_map[$order['customer_preferred_time']] ?? ucfirst($order['customer_preferred_time']); ?>)
+                                <?php endif; ?>
+                            </div>
+                        <?php endif; ?>
+                        
                         <form method="POST">
-                            <input type="hidden" name="order_id" value="<?php echo $order['id']; ?>">
+                            <input type="hidden" name="order_id" value="<?php echo $order['order_id']; ?>">
                             
                             <div class="form-group">
                                 <label>
@@ -1506,7 +1535,6 @@ if (isset($_GET['logout'])) {
                             document.getElementById('pickup_location_group').style.display = isPickup ? 'block' : 'none';
                             document.getElementById('delivery_info_group').style.display = isPickup ? 'none' : 'block';
                             
-                            // Toggle required attributes
                             document.getElementById('pickup_location').required = isPickup;
                             document.getElementById('delivery_date').required = !isPickup;
                             document.getElementById('carrier').required = !isPickup;
@@ -1601,10 +1629,10 @@ if (isset($_GET['logout'])) {
                         <tbody>
                             <?php foreach ($orders as $order): ?>
                                 <tr>
-                                    <td>#<?php echo $order['id']; ?></td>
+                                    <td>#<?php echo $order['order_id']; ?></td>
                                     <td><?php echo htmlspecialchars($order['email']); ?></td>
                                     <td><?php echo date('M d, Y', strtotime($order['order_date'])); ?></td>
-                                    <td>$<?php echo number_format($order['total_amount'], 2); ?></td>
+                                    <td>₱<?php echo number_format($order['total_amount'], 2); ?></td>
                                     <td>
                                         <span class="status <?php echo $order['status']; ?>">
                                             <?php echo ucfirst(str_replace('_', ' ', $order['status'])); ?>
@@ -1629,7 +1657,7 @@ if (isset($_GET['logout'])) {
                                         <?php endif; ?>
                                     </td>
                                     <td>
-                                        <a href="orders.php?id=<?php echo $order['id']; ?>" class="btn btn-primary btn-sm">
+                                        <a href="orders.php?id=<?php echo $order['order_id']; ?>" class="btn btn-primary btn-sm">
                                             <i class="fas fa-eye"></i> View
                                         </a>
                                     </td>
@@ -1643,7 +1671,6 @@ if (isset($_GET['logout'])) {
     </div>
 
     <script>
-        // Apply filters
         function applyFilters() {
             const status = document.getElementById('status').value;
             const date_from = document.getElementById('date_from').value;
@@ -1655,15 +1682,13 @@ if (isset($_GET['logout'])) {
             if (date_from) url += `date_from=${date_from}&`;
             if (date_to) url += `date_to=${date_to}&`;
             
-            window.location.href = url.slice(0, -1); // Remove last & or ?
+            window.location.href = url.slice(0, -1);
         }
         
-        // Reset filters
         function resetFilters() {
             window.location.href = 'orders.php';
         }
         
-        // Set max date for "to" filter
         document.addEventListener('DOMContentLoaded', function() {
             const dateFrom = document.getElementById('date_from');
             const dateTo = document.getElementById('date_to');
@@ -1679,7 +1704,6 @@ if (isset($_GET['logout'])) {
                 });
             }
             
-            // Initialize min date for "to" if "from" has value
             if (dateFrom && dateFrom.value && dateTo) {
                 dateTo.min = dateFrom.value;
             }

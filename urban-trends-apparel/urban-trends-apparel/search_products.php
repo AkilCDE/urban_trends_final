@@ -28,10 +28,19 @@ function isInWishlist($db, $user_id, $product_id) {
     return $stmt->fetchColumn() > 0;
 }
 
-foreach ($products as $product): ?>
-    <div class="product-card" data-id="<?php echo $product['id']; ?>">
-        <?php if($product['stock'] < 10): ?>
-            <span class="product-badge">Only <?php echo $product['stock']; ?> left</span>
+function getTotalStock($db, $product_id) {
+    $stmt = $db->prepare("SELECT SUM(stock) as total_stock FROM product_variations WHERE product_id = ?");
+    $stmt->execute([$product_id]);
+    $result = $stmt->fetch(PDO::FETCH_ASSOC);
+    return $result['total_stock'] ?? 0;
+}
+
+foreach ($products as $product):
+    $total_stock = getTotalStock($db, $product['product_id']);
+?>
+    <div class="product-card" data-id="<?php echo $product['product_id']; ?>">
+        <?php if($total_stock > 0 && $total_stock < 10): ?>
+            <span class="product-badge">Only <?php echo $total_stock; ?> left</span>
         <?php endif; ?>
         <div class="product-image-container">
             <img src="assets/images/products/<?php echo htmlspecialchars($product['image']); ?>" alt="<?php echo htmlspecialchars($product['name']); ?>" class="product-image">
@@ -40,14 +49,14 @@ foreach ($products as $product): ?>
             <h3 class="product-name"><?php echo htmlspecialchars($product['name']); ?></h3>
             <p class="product-price">$<?php echo number_format($product['price'], 2); ?></p>
             <div class="product-actions">
-                <button class="action-btn buy-now" data-id="<?php echo $product['id']; ?>">
+                <button class="action-btn buy-now" data-id="<?php echo $product['product_id']; ?>">
                     <i class="fas fa-bolt"></i> Buy Now
                 </button>
-                <button class="action-btn add-to-cart" data-id="<?php echo $product['id']; ?>">
+                <button class="action-btn add-to-cart" data-id="<?php echo $product['product_id']; ?>">
                     <i class="fas fa-cart-plus"></i> Add to Cart
                 </button>
-                <button class="wishlist-btn <?php echo isInWishlist($db, $_SESSION['user_id'] ?? null, $product['id']) ? 'active' : ''; ?>" 
-                        data-id="<?php echo $product['id']; ?>">
+                <button class="wishlist-btn <?php echo isInWishlist($db, $_SESSION['user_id'] ?? null, $product['product_id']) ? 'active' : ''; ?>" 
+                        data-id="<?php echo $product['product_id']; ?>">
                     <i class="fas fa-heart"></i>
                 </button>
             </div>

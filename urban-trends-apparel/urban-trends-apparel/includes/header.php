@@ -7,42 +7,54 @@ ob_start();
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Urban Trends Apparel - <?php echo $page_title ?? 'Home'; ?></title>
-    <link rel="stylesheet" href="../assets/style.css">
+    <title><?php echo isset($page_title) ? $page_title . ' - ' . SITE_NAME : SITE_NAME; ?></title>
+    
+    <!-- Font Awesome -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    
+    <!-- Google Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    
+    <!-- Main CSS -->
+    <link rel="stylesheet" href="<?php echo SITE_URL; ?>/assets/css/main.css">
+    
+    <!-- Page Specific CSS -->
+    <?php if (isset($page_css)): ?>
+        <?php foreach ($page_css as $css): ?>
+            <link rel="stylesheet" href="<?php echo SITE_URL; ?>/assets/css/<?php echo $css; ?>.css">
+        <?php endforeach; ?>
+    <?php endif; ?>
 </head>
 <body>
-    <header>
-        <div class="container">
-            <div class="header-content">
-                <div class="logo">
-                    <a href="index.php">Urban Trends</a>
-                </div>
-                <nav>
-                    <ul>
-                        <li><a href="index.php">Home</a></li>
-                        <li><a href="about.php">About us</a></li>
-                        <li><a href="contact.php">Contact us</a></li>
-                        <li><a href="shop.php">Shop</a></li>
-                    </ul>
-                </nav>
-                <div class="user-actions">
-                    <?php if ($auth->isLoggedIn()): ?>
-                        <a href="profile.php">Profile</a>
-                        <?php if ($auth->isAdmin()): ?>
-                            <a href="admin/dashboard.php">Admin</a>
-                        <?php endif; ?>
-                        <a href="logout.php">Logout</a>
-                    <?php else: ?>
-                        <a href="login.php">Login</a>
-                        <a href="register.php">Register</a>
-                    <?php endif; ?>
-                    <a href="cart.php" class="cart-link">Cart (<?php echo count($_SESSION['cart'] ?? []); ?>)</a>
-                </div>
+    <header class="header">
+        <nav class="nav container">
+            <a href="<?php echo SITE_URL; ?>" class="logo">
+                <?php echo SITE_NAME; ?>
+            </a>
+            
+            <div class="nav-links">
+                <a href="<?php echo SITE_URL; ?>/shop.php">Shop</a>
+                <a href="<?php echo SITE_URL; ?>/about.php">About</a>
+                <a href="<?php echo SITE_URL; ?>/contact.php">Contact</a>
+                
+                <?php if (is_logged_in()): ?>
+                    <a href="<?php echo SITE_URL; ?>/profile.php">My Account</a>
+                    <a href="<?php echo SITE_URL; ?>/logout.php">Logout</a>
+                <?php else: ?>
+                    <a href="<?php echo SITE_URL; ?>/login.php">Login</a>
+                    <a href="<?php echo SITE_URL; ?>/register.php">Register</a>
+                <?php endif; ?>
+                
+                <a href="<?php echo SITE_URL; ?>/cart.php" class="cart-icon">
+                    <i class="fas fa-shopping-cart"></i>
+                    <span class="cart-count">0</span>
+                </a>
             </div>
-        </div>
+        </nav>
     </header>
-
-    <main class="container">
+    
+    <main class="main-content">
+        <div class="container">
 <?php
 // End output buffering and store header content
 $header = ob_get_clean();

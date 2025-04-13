@@ -15,7 +15,7 @@ try {
 
 $productId = $_GET['id'] ?? 0;
 
-$stmt = $db->prepare("SELECT * FROM products WHERE id = ?");
+$stmt = $db->prepare("SELECT * FROM products WHERE product_id = ?");
 $stmt->execute([$productId]);
 $product = $stmt->fetch(PDO::FETCH_ASSOC);
 

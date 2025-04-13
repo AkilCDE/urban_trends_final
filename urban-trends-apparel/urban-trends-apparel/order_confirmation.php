@@ -59,9 +59,9 @@ $stmt = $db->prepare("
     SELECT o.*, p.payment_method, p.transaction_id, p.status as payment_status,
            d.preferred_date, d.preferred_time_slot, d.pickup_option, d.pickup_location
     FROM orders o
-    LEFT JOIN payments p ON o.id = p.order_id
-    LEFT JOIN delivery_schedules d ON o.id = d.order_id
-    WHERE o.id = ? AND o.user_id = ?
+    LEFT JOIN payments p ON o.order_id = p.order_id
+    LEFT JOIN delivery_schedules d ON o.order_id = d.order_id
+    WHERE o.order_id = ? AND o.user_id = ?
 ");
 $stmt->execute([$order_id, $user_id]);
 $order = $stmt->fetch(PDO::FETCH_ASSOC);
@@ -71,15 +71,24 @@ if (!$order) {
     exit;
 }
 
-// Get order items
+// Get order items with variation details
 $stmt = $db->prepare("
-    SELECT oi.*, p.name, p.image 
+    SELECT oi.*, p.name, p.image, pv.size
     FROM order_items oi 
-    JOIN products p ON oi.product_id = p.id 
+    JOIN products p ON oi.product_id = p.product_id 
+    LEFT JOIN product_variations pv ON oi.variation_id = pv.variation_id 
     WHERE oi.order_id = ?
 ");
 $stmt->execute([$order_id]);
 $order_items = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+// Calculate subtotal
+$subtotal = 0;
+foreach ($order_items as $item) {
+    $subtotal += $item['price'] * $item['quantity'];
+}
+$shipping = 50.00;
+$total = $subtotal + $shipping;
 
 // Get cart count
 $cart_count = 0;
@@ -151,7 +160,7 @@ if ($auth->isLoggedIn()) {
         .header-right {
             display: flex;
             align-items: center;
-            gap: 28rem;
+            gap: 2rem; /* Adjusted for consistency with checkout.php */
         }
 
         .logo {
@@ -352,6 +361,11 @@ if ($auth->isLoggedIn()) {
         .order-item-price {
             font-weight: 600;
             color: var(--accent-color);
+        }
+        
+        .order-item-size {
+            color: var(--text-muted);
+            font-size: 0.9rem;
         }
         
         .status-badge {
@@ -567,7 +581,6 @@ if ($auth->isLoggedIn()) {
                 <?php else: ?>
                     <a href="login.php" title="Login"><i class="fas fa-sign-in-alt"></i></a>
                     <a href="register.php" title="Register"><i class="fas fa-user-plus"></i></a>
-                    
                 <?php endif; ?>
             </div>
         </div>
@@ -592,31 +605,33 @@ if ($auth->isLoggedIn()) {
                     <h4><i class="fas fa-info-circle"></i> Order Information</h4>
                     <p><strong>Order #:</strong> <?php echo $order_id; ?></p>
                     <p><strong>Date:</strong> <?php echo date('M d, Y h:i A', strtotime($order['order_date'])); ?></p>
-                    <p><strong>Status:</strong> <span class="status-badge status-pending">Pending</span></p>
+                    <p><strong>Status:</strong> <span class="status-badge status-<?php echo htmlspecialchars($order['status']); ?>">
+                        <?php echo ucfirst(htmlspecialchars($order['status'])); ?>
+                    </span></p>
                 </div>
                 
                 <div class="order-detail-group">
                     <h4><i class="fas fa-truck"></i> Delivery Information</h4>
                     <?php if ($order['pickup_option']): ?>
-                        <p><strong>Pickup Location:</strong> <?php echo htmlspecialchars($order['pickup_location']); ?></p>
-                        <p><strong>Ready for pickup on:</strong> <?php echo date('M d, Y', strtotime($order['preferred_date'])); ?></p>
+                        <p><strong>Pickup Location:</strong> <?php echo htmlspecialchars($order['pickup_location'] ?: 'N/A'); ?></p>
+                        <p><strong>Ready for pickup on:</strong> <?php echo date('M d, Y', strtotime($order['preferred_date'] ?: date('Y-m-d'))); ?></p>
                     <?php else: ?>
                         <p><strong>Delivery Address:</strong> <?php echo htmlspecialchars($order['shipping_address']); ?></p>
                         <p><strong>Scheduled Delivery:</strong> 
-                            <?php echo date('M d, Y', strtotime($order['preferred_date'])); ?> 
-                            (<?php echo ucfirst($order['preferred_time_slot']); ?>)
+                            <?php echo date('M d, Y', strtotime($order['preferred_date'] ?: date('Y-m-d'))); ?> 
+                            (<?php echo ucfirst(htmlspecialchars($order['preferred_time_slot'] ?: 'N/A')); ?>)
                         </p>
                     <?php endif; ?>
                 </div>
                 
                 <div class="order-detail-group">
                     <h4><i class="fas fa-credit-card"></i> Payment Information</h4>
-                    <p><strong>Method:</strong> <?php echo ucfirst(str_replace('_', ' ', $order['payment_method'])); ?></p>
+                    <p><strong>Method:</strong> <?php echo ucfirst(str_replace('_', ' ', htmlspecialchars($order['payment_method']))); ?></p>
                     <p><strong>Status:</strong> <span class="status-badge status-<?php echo $order['payment_status'] === 'completed' ? 'completed' : 'pending'; ?>">
-                        <?php echo ucfirst($order['payment_status']); ?>
+                        <?php echo ucfirst(htmlspecialchars($order['payment_status'])); ?>
                     </span></p>
                     <?php if (!empty($order['transaction_id'])): ?>
-                        <p><strong>Transaction ID:</strong> <?php echo $order['transaction_id']; ?></p>
+                        <p><strong>Transaction ID:</strong> <?php echo htmlspecialchars($order['transaction_id']); ?></p>
                     <?php endif; ?>
                 </div>
             </div>
@@ -625,10 +640,15 @@ if ($auth->isLoggedIn()) {
                 <h4><i class="fas fa-box-open"></i> Order Items</h4>
                 <?php foreach ($order_items as $item): ?>
                     <div class="order-item">
-                        <img src="assets/images/products/<?php echo htmlspecialchars($item['image']); ?>" 
-                             alt="<?php echo htmlspecialchars($item['name']); ?>" class="order-item-image">
+                        <img src="assets/images/products/<?php echo htmlspecialchars($item['image'] ?: 'default-product.jpg'); ?>" 
+                             alt="<?php echo htmlspecialchars($item['name']); ?>" 
+                             class="order-item-image"
+                             onerror="this.src='assets/images/products/default-product.jpg'">
                         <div class="order-item-details">
                             <h5><?php echo htmlspecialchars($item['name']); ?></h5>
+                            <?php if ($item['size']): ?>
+                                <p class="order-item-size">Size: <?php echo htmlspecialchars($item['size']); ?></p>
+                            <?php endif; ?>
                         </div>
                         <div style="text-align: right;">
                             <p>₱<?php echo number_format($item['price'], 2); ?></p>
@@ -639,9 +659,9 @@ if ($auth->isLoggedIn()) {
                 <?php endforeach; ?>
                 
                 <div style="text-align: right; margin-top: 1rem;">
-                    <p><strong>Subtotal: ₱<?php echo number_format($order['total_amount'], 2); ?></strong></p>
-                    <p><strong>Shipping: ₱50.00</strong></p>
-                    <p><strong>Total: ₱<?php echo number_format($order['total_amount'] + 50, 2); ?></strong></p>
+                    <p><strong>Subtotal:</strong> ₱<?php echo number_format($subtotal, 2); ?></p>
+                    <p><strong>Shipping:</strong> ₱<?php echo number_format($shipping, 2); ?></p>
+                    <p><strong>Total:</strong> ₱<?php echo number_format($total, 2); ?></p>
                 </div>
             </div>
         </div>
@@ -701,7 +721,7 @@ if ($auth->isLoggedIn()) {
         </div>
         
         <div class="copyright">
-            &copy; <?php echo date('Y'); ?> Urban Trends Apparel. All rights reserved.
+            © <?php echo date('Y'); ?> Urban Trends Apparel. All rights reserved.
         </div>
     </div>
 </footer>

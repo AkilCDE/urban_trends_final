@@ -11,7 +11,7 @@ try {
 
     // Admin account details
     $email = 'admin@urbantrends.com';
-    $password = 'StrongAdminPassword123!';
+    $password = 'admin123!';
     $firstname = 'Admin';
     $lastname = 'User';
     $address = '123 Admin Street, Admin City';

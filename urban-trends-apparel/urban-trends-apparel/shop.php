@@ -69,47 +69,83 @@ if (isset($_GET['logout'])) {
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (isset($_POST['add_to_cart']) || isset($_POST['buy_now'])) {
         $product_id = $_POST['product_id'];
-        $quantity = isset($_POST['quantity']) ? max(1, (int)$_POST['quantity']) : 1;
+        $quantity = isset($_POST['quantity']) ? max(1, (int)$_POST['quantity']) : 0;
+        $variation_id = isset($_POST['variation_id']) ? (int)$_POST['variation_id'] : null;
         
+        if ($quantity <= 0) {
+            $_SESSION['error_message'] = "Please select a valid quantity";
+            header("Location: shop.php" . (isset($_GET['category']) ? '?category='.$_GET['category'] : ''));
+            exit;
+        }
+
         try {
-            // Check product stock
-            $stmt = $db->prepare("SELECT stock FROM products WHERE id = ?");
+            // Check if product has variations
+            $stmt = $db->prepare("SELECT COUNT(*) FROM product_variations WHERE product_id = ?");
             $stmt->execute([$product_id]);
-            $product = $stmt->fetch();
-            
-            if (!$product || $product['stock'] <= 0) {
-                $_SESSION['error_message'] = "This product is out of stock";
+            $has_variations = $stmt->fetchColumn() > 0;
+
+            if ($has_variations && !$variation_id) {
+                $_SESSION['error_message'] = "Please select a size";
                 header("Location: shop.php" . (isset($_GET['category']) ? '?category='.$_GET['category'] : ''));
                 exit;
             }
-            
-            if ($quantity > $product['stock']) {
-                $_SESSION['error_message'] = "Only {$product['stock']} items available in stock";
-                header("Location: shop.php" . (isset($_GET['category']) ? '?category='.$_GET['category'] : ''));
-                exit;
+
+            if ($variation_id) {
+                // Check variation stock
+                $stmt = $db->prepare("SELECT stock FROM product_variations WHERE variation_id = ?");
+                $stmt->execute([$variation_id]);
+                $variation = $stmt->fetch();
+                
+                if (!$variation || $variation['stock'] <= 0) {
+                    $_SESSION['error_message'] = "This product variation is out of stock";
+                    header("Location: shop.php" . (isset($_GET['category']) ? '?category='.$_GET['category'] : ''));
+                    exit;
+                }
+                
+                if ($quantity > $variation['stock']) {
+                    $_SESSION['error_message'] = "Only {$variation['stock']} items available in stock for this size";
+                    header("Location: shop.php" . (isset($_GET['category']) ? '?category='.$_GET['category'] : ''));
+                    exit;
+                }
+            } else {
+                // Check product stock (if no variations)
+                $stmt = $db->prepare("SELECT SUM(stock) as total_stock FROM product_variations WHERE product_id = ?");
+                $stmt->execute([$product_id]);
+                $stock = $stmt->fetch();
+                
+                if (!$stock || $stock['total_stock'] <= 0) {
+                    $_SESSION['error_message'] = "This product is out of stock";
+                    header("Location: shop.php" . (isset($_GET['category']) ? '?category='.$_GET['category'] : ''));
+                    exit;
+                }
             }
             
             if (isset($_POST['add_to_cart'])) {
-                // Check if product already in cart
-                $stmt = $db->prepare("SELECT * FROM cart WHERE user_id = ? AND product_id = ?");
-                $stmt->execute([$_SESSION['user_id'], $product_id]);
+                // Check if product already in cart with same variation
+                $stmt = $db->prepare("SELECT * FROM cart WHERE user_id = ? AND product_id = ? AND variation_id " . 
+                                    ($variation_id ? "= ?" : "IS NULL"));
+                $params = [$_SESSION['user_id'], $product_id];
+                if ($variation_id) $params[] = $variation_id;
+                $stmt->execute($params);
                 $existing_item = $stmt->fetch();
                 
                 if ($existing_item) {
                     // Update quantity if already in cart
                     $new_quantity = $existing_item['quantity'] + $quantity;
-                    if ($new_quantity > $product['stock']) {
+                    $max_stock = $variation_id ? $variation['stock'] : $stock['total_stock'];
+                    
+                    if ($new_quantity > $max_stock) {
                         $_SESSION['error_message'] = "You can't add more than available stock";
                         header("Location: shop.php" . (isset($_GET['category']) ? '?category='.$_GET['category'] : ''));
                         exit;
                     }
                     
-                    $stmt = $db->prepare("UPDATE cart SET quantity = quantity + ? WHERE id = ?");
-                    $stmt->execute([$quantity, $existing_item['id']]);
+                    $stmt = $db->prepare("UPDATE cart SET quantity = quantity + ? WHERE cart_id = ?");
+                    $stmt->execute([$quantity, $existing_item['cart_id']]);
                 } else {
                     // Add new item to cart
-                    $stmt = $db->prepare("INSERT INTO cart (user_id, product_id, quantity) VALUES (?, ?, ?)");
-                    $stmt->execute([$_SESSION['user_id'], $product_id, $quantity]);
+                    $stmt = $db->prepare("INSERT INTO cart (user_id, product_id, variation_id, quantity) VALUES (?, ?, ?, ?)");
+                    $stmt->execute([$_SESSION['user_id'], $product_id, $variation_id, $quantity]);
                 }
                 
                 $_SESSION['success_message'] = "Product added to cart successfully!";
@@ -121,8 +157,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $stmt->execute([$_SESSION['user_id']]);
                 
                 // Add the selected product to cart
-                $stmt = $db->prepare("INSERT INTO cart (user_id, product_id, quantity) VALUES (?, ?, ?)");
-                $stmt->execute([$_SESSION['user_id'], $product_id, $quantity]);
+                $stmt = $db->prepare("INSERT INTO cart (user_id, product_id, variation_id, quantity) VALUES (?, ?, ?, ?)");
+                $stmt->execute([$_SESSION['user_id'], $product_id, $variation_id, $quantity]);
                 
                 header("Location: checkout.php");
                 exit;
@@ -182,37 +218,60 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 // Get products with category filtering and stock check
 $category = isset($_GET['category']) ? $_GET['category'] : null;
 
-// Map the category parameter to database values
 $category_mapping = [
     'men' => 'men_tshirts',
-    'women' => 'women_tshirts',
+    'women' => 'women', 
     'shoes' => 'shoes',
-    'accessories' => 'accessories'
+    'accessories' => 'access' 
 ];
 
 $db_category = isset($category_mapping[$category]) ? $category_mapping[$category] : null;
 
-// Get products - only those with stock > 0
-$query = "SELECT * FROM products WHERE stock > 0";
+// Get products with available stock (either in variations or base product)
+$query = "SELECT p.*, 
+          (SELECT COUNT(*) FROM product_variations pv WHERE pv.product_id = p.product_id) as has_variations,
+          (SELECT SUM(stock) FROM product_variations pv WHERE pv.product_id = p.product_id) as total_stock
+          FROM products p";
+
 $params = [];
 
 if ($db_category) {
-    $query .= " AND category = ?";
-    $params[] = $db_category;
+    if ($db_category === 'women') {
+        $query .= " WHERE p.category LIKE 'women%'";
+    } elseif ($db_category === 'access') {
+        $query .= " WHERE p.category LIKE 'access%'";
+    } else {
+        $query .= " WHERE p.category = ?";
+        $params[] = $db_category;
+    }
+} else {
+    $query .= " WHERE 1=1";
 }
 
-$query .= " ORDER BY created_at DESC";
+// Only show products with available stock
+$query .= " AND ((SELECT SUM(stock) FROM product_variations pv WHERE pv.product_id = p.product_id) > 0 
+          OR (SELECT COUNT(*) FROM product_variations pv WHERE pv.product_id = p.product_id) = 0)";
+
+$query .= " ORDER BY p.created_at DESC";
 
 $stmt = $db->prepare($query);
 $stmt->execute($params);
 $products = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
+// Get variations for each product
+foreach ($products as &$product) {
+    $stmt = $db->prepare("SELECT * FROM product_variations WHERE product_id = ? ORDER BY size");
+    $stmt->execute([$product['product_id']]);
+    $product['variations'] = $stmt->fetchAll(PDO::FETCH_ASSOC);
+}
+unset($product);
+
 // Get cart count
 $cart_count = 0;
 if ($auth->isLoggedIn()) {
-    $stmt = $db->prepare("SELECT COUNT(*) FROM cart WHERE user_id = ?");
+    $stmt = $db->prepare("SELECT SUM(quantity) FROM cart WHERE user_id = ?");
     $stmt->execute([$_SESSION['user_id']]);
-    $cart_count = $stmt->fetchColumn();
+    $cart_count = $stmt->fetchColumn() ?: 0;
 }
 
 // Check if product is in wishlist
@@ -470,7 +529,7 @@ function isInWishlist($db, $user_id, $product_id) {
 
         .categories {
             display: flex;
-            justify-content: center;
+ to justify-content: center;
             margin-bottom: 2rem;
             flex-wrap: wrap;
             gap: 1rem;
@@ -647,136 +706,54 @@ function isInWishlist($db, $user_id, $product_id) {
             background-color: #666 !important;
         }
 
-        /* Quick View Modal */
-        .modal {
-            display: none;
-            position: fixed;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            background-color: rgba(0, 0, 0, 0.8);
-            z-index: 1000;
-            overflow-y: auto;
-            padding: 2rem 0;
-        }
-
-        .modal-content {
-            background-color: var(--primary-color);
-            margin: 0 auto;
-            max-width: 900px;
-            border-radius: var(--border-radius);
-            overflow: hidden;
-            box-shadow: var(--box-shadow);
-            animation: modalFadeIn 0.3s ease;
-        }
-
-        @keyframes modalFadeIn {
-            from { opacity: 0; transform: translateY(-50px); }
-            to { opacity: 1; transform: translateY(0); }
-        }
-
-        .close-modal {
-            position: absolute;
-            top: 1rem;
-            right: 1rem;
-            font-size: 2rem;
-            color: white;
-            cursor: pointer;
-            transition: var(--transition);
-        }
-
-        .close-modal:hover {
-            color: var(--accent-color);
-        }
-
-        .modal-product {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 2rem;
-        }
-
-        .modal-product-image {
-            width: 100%;
-            height: 500px;
-            object-fit: cover;
-        }
-
-        .modal-product-info {
-            padding: 2rem;
-        }
-
-        .modal-product-name {
-            font-size: 2rem;
-            margin-bottom: 1rem;
-            color: var(--text-color);
-        }
-
-        .modal-product-price {
-            font-size: 1.8rem;
-            font-weight: 700;
-            color: var(--accent-color);
-            margin-bottom: 1.5rem;
-        }
-
-        .modal-product-description {
-            margin-bottom: 2rem;
-            color: var(--text-muted);
-            line-height: 1.7;
-        }
-
-        .modal-product-options {
-            margin-bottom: 2rem;
-        }
-
-        .option-group {
-            margin-bottom: 1.5rem;
-        }
-
-        .option-group label {
-            display: block;
-            margin-bottom: 0.5rem;
-            font-weight: 500;
-            color: var(--text-color);
-        }
-
-        .size-options {
+        /* Size selector styles */
+        .size-selector {
+            margin: 10px 0;
             display: flex;
-            gap: 0.8rem;
+            flex-wrap: wrap;
+            gap: 8px;
         }
 
-        .size-option {
-            padding: 0.6rem 1rem;
+        .size-button {
+            padding: 8px 12px;
             background-color: rgba(255, 255, 255, 0.1);
             border: 1px solid #444;
-            border-radius: var(--border-radius);
+            border-radius: 4px;
             cursor: pointer;
+            color: var(--text-color);
+            font-size: 0.9rem;
             transition: var(--transition);
         }
 
-        .size-option:hover, .size-option.selected {
+        .size-button:hover, .size-button.selected {
             background-color: var(--accent-color);
             color: white;
             border-color: var(--accent-color);
         }
 
+        .size-button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        /* Quantity selector styles */
         .quantity-selector {
             display: flex;
             align-items: center;
-            gap: 1rem;
+            gap: 8px;
+            margin: 10px 0;
         }
 
         .quantity-btn {
-            width: 40px;
-            height: 40px;
+            width: 32px;
+            height: 32px;
             display: flex;
             align-items: center;
             justify-content: center;
             background-color: rgba(255, 255, 255, 0.1);
             border: none;
-            border-radius: var(--border-radius);
+            border-radius: 4px;
             cursor: pointer;
-            font-size: 1.2rem;
             color: var(--text-color);
             transition: var(--transition);
         }
@@ -789,50 +766,12 @@ function isInWishlist($db, $user_id, $product_id) {
         .quantity-input {
             width: 60px;
             text-align: center;
-            padding: 0.8rem;
+            padding: 8px;
             background-color: rgba(255, 255, 255, 0.1);
             border: 1px solid #444;
-            border-radius: var(--border-radius);
+            border-radius: 4px;
             color: var(--text-color);
-            font-size: 1.1rem;
-        }
-
-        .modal-actions {
-            display: flex;
-            gap: 1rem;
-            margin-top: 2rem;
-        }
-
-        .modal-action-btn {
-            flex: 1;
-            padding: 1rem;
-            border: none;
-            border-radius: var(--border-radius);
-            cursor: pointer;
-            font-weight: 600;
-            transition: var(--transition);
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            gap: 8px;
-        }
-
-        .add-to-cart-modal {
-            background-color: rgba(255, 255, 255, 0.1);
-            color: var(--text-color);
-        }
-
-        .add-to-cart-modal:hover {
-            background-color: rgba(255, 255, 255, 0.2);
-        }
-
-        .buy-now-modal {
-            background-color: var(--accent-color);
-            color: white;
-        }
-
-        .buy-now-modal:hover {
-            background-color: #ff5252;
+            font-size: 0.9rem;
         }
 
         /* Footer */
@@ -956,16 +895,6 @@ function isInWishlist($db, $user_id, $product_id) {
         }
 
         /* Responsive */
-        @media (max-width: 992px) {
-            .modal-product {
-                grid-template-columns: 1fr;
-            }
-            
-            .modal-product-image {
-                height: 400px;
-            }
-        }
-
         @media (max-width: 768px) {
             header {
                 flex-direction: column;
@@ -996,57 +925,52 @@ function isInWishlist($db, $user_id, $product_id) {
                 font-size: 2rem;
             }
 
-            .modal-product-info {
-                padding: 1.5rem;
-            }
-
-            .modal-product-name {
-                font-size: 1.5rem;
-            }
-
-            .modal-product-price {
-                font-size: 1.5rem;
-            }
-
-            .modal-actions {
+            .product-actions {
                 flex-direction: column;
+            }
+
+            .action-btn {
+                width: 100%;
             }
         }
     </style>
 </head>
 <body>
-<header>
-    <div class="container">
-        <div class="logo">
-            <a href="index.php"><i class="fas fa-tshirt"></i> Urban Trends</a>
-        </div>
-        
-        <div style="display: flex; align-items: center;">
-            <nav>
-                <ul>
-                    <li><a href="index.php"><i class="fas fa-home"></i> Home</a></li>
-                    <li><a href="shop.php"><i class="fas fa-store"></i> Shop</a></li>
-                    <li><a href="about.php"><i class="fas fa-info-circle"></i> About</a></li>
-                    <li><a href="contact.php"><i class="fas fa-envelope"></i> Contact</a></li>
-                </ul>
-            </nav>
+    <header>
+        <div class="container">
+            <div class="logo">
+                <a href="index.php"><i class="fas fa-tshirt"></i> Urban Trends</a>
+            </div>
             
-            <div class="user-actions" style="margin-left: auto;">
-                <?php if ($auth->isLoggedIn()): ?>
-                    <?php if ($auth->isAdmin()): ?>
-                        <a href="admin/dashboard.php" title="Admin"><i class="fas fa-cog"></i></a>
+            <div style="display: flex; align-items: center;">
+                <nav>
+                    <ul>
+                        <li><a href="index.php"><i class="fas fa-home"></i> Home</a></li>
+                        <li><a href="shop.php"><i class="fas fa-store"></i> Shop</a></li>
+                        <li><a href="about.php"><i class="fas fa-info-circle"></i> About</a></li>
+                        <li><a href="contact.php"><i class="fas fa-envelope"></i> Contact</a></li>
+                    </ul>
+                </nav>
+                
+                <div class="user-actions" style="margin-left: auto;">
+                    <?php if ($auth->isLoggedIn()): ?>
+                        <?php if ($auth->isAdmin()): ?>
+                            <a href="admin/dashboard.php" title="Admin"><i class="fas fa-cog"></i></a>
+                        <?php endif; ?>
+                        <a href="profile.php" title="Profile"><i class="fas fa-user"></i> Profile</a>
+                        <a href="?logout=1" title="Logout"><i class="fas fa-sign-out-alt"></i> logout</a>
+                        <a href="cart.php" title="Cart" class="cart-count">
+                            <i class="fas fa-shopping-cart"></i>
+                            <span id="cart-counter"><?php echo $cart_count; ?></span>
+                        </a>
+                    <?php else: ?>
+                        <a href="login.php" title="Login"><i class="fas fa-sign-in-alt"></i>Login first</a>
+                        <a href="register.php" title="Register"><i class="fas fa-user-plus"></i></a>
                     <?php endif; ?>
-                    <a href="profile.php" title="Profile"><i class="fas fa-user"></i>   Profile</a>
-                    <a href="?logout=1" title="Logout"><i class="fas fa-sign-out-alt"></i>    logout</a>
-                      <?php else: ?>
-                    <a href="login.php" title="Login"><i class="fas fa-sign-in-alt"></i>Login first</a>
-                    <a href="register.php" title="Register"><i class="fas fa-user-plus"></i></a>
-                   
-                <?php endif; ?>
+                </div>
             </div>
         </div>
-    </div>
-</header>
+    </header>
     
     <main class="container">
         <!-- Display success/error messages -->
@@ -1075,9 +999,9 @@ function isInWishlist($db, $user_id, $product_id) {
                     if ($db_category) {
                         switch($db_category) {
                             case 'men_tshirts': echo "MEN'S FASHION"; break;
-                            case 'women_tshirts': echo "WOMEN'S FASHION"; break;
+                            case 'women': echo "WOMEN'S FASHION"; break;
                             case 'shoes': echo "FOOTWEAR"; break;
-                            case 'accessories': echo "ACCESSORIES"; break;
+                            case 'access': echo "ACCESSORIES"; break;
                             default: echo "SHOP COLLECTION";
                         }
                     } else {
@@ -1100,72 +1024,109 @@ function isInWishlist($db, $user_id, $product_id) {
             <div class="categories">
                 <button class="category-btn <?php echo !$db_category ? 'active' : ''; ?>" data-category="all">All Products</button>
                 <button class="category-btn <?php echo $db_category === 'men_tshirts' ? 'active' : ''; ?>" data-category="men">Men's Fashion</button>
-                <button class="category-btn <?php echo $db_category === 'women_tshirts' ? 'active' : ''; ?>" data-category="women">Women's Fashion</button>
+                <button class="category-btn <?php echo $db_category === 'women' ? 'active' : ''; ?>" data-category="women">Women's Fashion</button>
                 <button class="category-btn <?php echo $db_category === 'shoes' ? 'active' : ''; ?>" data-category="shoes">Footwear</button>
-                <button class="category-btn <?php echo $db_category === 'accessories' ? 'active' : ''; ?>" data-category="accessories">Accessories</button>
+                <button class="category-btn <?php echo $db_category === 'access' ? 'active' : ''; ?>" data-category="accessories">Accessories</button>
             </div>
             
             <div class="products-grid" id="productsContainer">
-                <?php foreach ($products as $product): ?>
-                    <div class="product-card" data-id="<?php echo $product['id']; ?>">
-                        <?php if($product['stock'] <= 0): ?>
+                <?php foreach ($products as $product): 
+                    $has_variations = $product['has_variations'] > 0;
+                    $total_stock = $product['total_stock'] ?? 0;
+                    // Modified image path to ensure correct resolution
+                    $primary_image = file_exists("assets/images/products/" . $product['image']) 
+                        ? $product['image'] 
+                        : 'default-product.jpg';
+                ?>
+                    <div class="product-card" data-id="<?php echo $product['product_id']; ?>">
+                        <?php if($total_stock <= 0): ?>
                             <div class="out-of-stock-overlay">
                                 <span>OUT OF STOCK</span>
                             </div>
-                        <?php elseif($product['stock'] < 10): ?>
-                            <span class="product-badge">Only <?php echo $product['stock']; ?> left</span>
+                        <?php elseif($total_stock < 10): ?>
+                            <span class="product-badge">Only <?php echo $total_stock; ?> left</span>
                         <?php endif; ?>
                         
                         <div class="product-image-container">
-                            <img src="assets/images/products/<?php echo htmlspecialchars($product['image']); ?>" alt="<?php echo htmlspecialchars($product['name']); ?>" class="product-image">
+                            <img src="assets/images/products/<?php echo htmlspecialchars($primary_image); ?>" 
+                                 alt="<?php echo htmlspecialchars($product['name']); ?>" 
+                                 class="product-image"
+                                 onerror="this.src='assets/images/products/default-product.jpg'">
                         </div>
                         <div class="product-info">
                             <h3 class="product-name"><?php echo htmlspecialchars($product['name']); ?></h3>
-                            <p class="product-price">₱<?php echo number_format($product['price'], 2); ?></p>
-                            <div class="product-actions">
-                                <?php if($product['stock'] > 0): ?>
-                                    <form method="POST" style="display: inline;">
-                                        <input type="hidden" name="product_id" value="<?php echo $product['id']; ?>">
-                                        <button type="submit" name="buy_now" class="action-btn buy-now">
-                                            <i class="fas fa-bolt"></i> Buy Now
-                                        </button>
-                                    </form>
-                                    <form method="POST" style="display: inline;">
-                                        <input type="hidden" name="product_id" value="<?php echo $product['id']; ?>">
-                                        <button type="submit" name="add_to_cart" class="action-btn add-to-cart">
-                                            <i class="fas fa-cart-plus"></i> Add to Cart
-                                        </button>
-                                    </form>
-                                <?php else: ?>
-                                    <button class="action-btn buy-now" disabled>
-                                        <i class="fas fa-ban"></i> Out of Stock
-                                    </button>
+                            <p class="product-price" data-base-price="<?php echo $product['price']; ?>">
+                                ₱<?php echo number_format($product['price'], 2); ?>
+                            </p>
+                            
+                            <form method="POST" class="product-form" data-id="<?php echo $product['product_id']; ?>">
+                                <input type="hidden" name="product_id" value="<?php echo $product['product_id']; ?>">
+                                
+                                <?php if($has_variations && $total_stock > 0): ?>
+                                    <div class="size-selector">
+                                        <?php foreach ($product['variations'] as $variation): ?>
+                                            <?php if ($variation['stock'] > 0): ?>
+                                                <button type="button" 
+                                                        class="size-button" 
+                                                        data-variation-id="<?php echo $variation['variation_id']; ?>"
+                                                        data-stock="<?php echo $variation['stock']; ?>"
+                                                        data-price-adjustment="<?php echo $variation['price_adjustment']; ?>">
+                                                    <?php echo $variation['size']; ?>
+                                                </button>
+                                            <?php endif; ?>
+                                        <?php endforeach; ?>
+                                        <input type="hidden" name="variation_id" class="selected-variation">
+                                    </div>
                                 <?php endif; ?>
                                 
-                                <form method="POST" style="display: inline;">
-                                    <input type="hidden" name="product_id" value="<?php echo $product['id']; ?>">
-                                    <input type="hidden" name="wishlist_action" value="<?php echo isInWishlist($db, $_SESSION['user_id'], $product['id']) ? 'remove' : 'add'; ?>">
-                                    <button type="submit" class="wishlist-btn <?php echo isInWishlist($db, $_SESSION['user_id'], $product['id']) ? 'active' : ''; ?>">
-                                        <i class="fas fa-heart"></i>
-                                    </button>
-                                </form>
-                            </div>
+                                <?php if($total_stock > 0): ?>
+                                    <div class="quantity-selector">
+                                        <button type="button" class="quantity-btn minus">-</button>
+                                        <input type="number" 
+                                               name="quantity" 
+                                               class="quantity-input" 
+                                               value="1" 
+                                               min="1" 
+                                               max="<?php echo $total_stock; ?>" 
+                                               readonly>
+                                        <button type="button" class="quantity-btn plus">+</button>
+                                    </div>
+                                
+                                    <div class="product-actions">
+                                        <button type="submit" 
+                                                name="buy_now" 
+                                                class="action-btn buy-now" 
+                                                disabled 
+                                                data-action="buy">
+                                            <i class="fas fa-bolt"></i> Buy Now
+                                        </button>
+                                        <button type="submit" 
+                                                name="add_to_cart" 
+                                                class="action-btn add-to-cart" 
+                                                disabled 
+                                                data-action="cart">
+                                            <i class="fas fa-cart-plus"></i> Add to Cart
+                                        </button>
+                                        <button type="button" 
+                                                class="wishlist-btn <?php echo isInWishlist($db, $_SESSION['user_id'], $product['product_id']) ? 'active' : ''; ?>" 
+                                                onclick="toggleWishlist(<?php echo $product['product_id']; ?>, this)">
+                                            <i class="fas fa-heart"></i>
+                                        </button>
+                                    </div>
+                                <?php else: ?>
+                                    <div class="product-actions">
+                                        <button class="action-btn buy-now" disabled>
+                                            <i class="fas fa-ban"></i> Out of Stock
+                                        </button>
+                                    </div>
+                                <?php endif; ?>
+                            </form>
                         </div>
                     </div>
                 <?php endforeach; ?>
             </div>
         </section>
     </main>
-
-    <!-- Quick View Modal -->
-    <div class="modal" id="quickViewModal">
-        <span class="close-modal" id="closeModal">&times;</span>
-        <div class="modal-content">
-            <div class="modal-product" id="modalProductContent">
-                <!-- Content will be loaded via AJAX -->
-            </div>
-        </div>
-    </div>
 
     <footer>
         <div class="container">
@@ -1215,7 +1176,7 @@ function isInWishlist($db, $user_id, $product_id) {
             </div>
             
             <div class="copyright">
-                &copy; <?php echo date('Y'); ?> Urban Trends Apparel. All rights reserved.
+                © <?php echo date('Y'); ?> Urban Trends Apparel. All rights reserved.
             </div>
         </div>
     </footer>
@@ -1237,11 +1198,7 @@ function isInWishlist($db, $user_id, $product_id) {
         document.querySelectorAll('.category-btn').forEach(button => {
             button.addEventListener('click', function() {
                 const category = this.getAttribute('data-category');
-                if (category === 'all') {
-                    window.location.href = 'shop.php';
-                } else {
-                    window.location.href = `shop.php?category=${category}`;
-                }
+                window.location.href = category === 'all' ? 'shop.php' : `shop.php?category=${category}`;
             });
         });
 
@@ -1259,135 +1216,115 @@ function isInWishlist($db, $user_id, $product_id) {
             .then(response => response.text())
             .then(html => {
                 document.getElementById('productsContainer').innerHTML = html;
-                attachEventListeners();
+                initializeProductControls();
             });
         });
 
-        // Quick View Modal
-        const modal = document.getElementById('quickViewModal');
-        const closeModal = document.getElementById('closeModal');
+        // Initialize product controls
+        function initializeProductControls() {
+            document.querySelectorAll('.product-card').forEach(card => {
+                const form = card.querySelector('.product-form');
+                const sizeButtons = card.querySelectorAll('.size-button');
+                const quantityInput = card.querySelector('.quantity-input');
+                const minusBtn = card.querySelector('.quantity-btn.minus');
+                const plusBtn = card.querySelector('.quantity-btn.plus');
+                const buyBtn = card.querySelector('.buy-now');
+                const cartBtn = card.querySelector('.add-to-cart');
+                const variationInput = card.querySelector('.selected-variation');
 
-        function openQuickView(productId) {
-            fetch(`get_product.php?id=${productId}`)
-                .then(response => response.text())
-                .then(html => {
-                    document.getElementById('modalProductContent').innerHTML = html;
-                    modal.style.display = 'block';
-                    document.body.style.overflow = 'hidden';
+                // Size selection
+                sizeButtons.forEach(button => {
+                    button.addEventListener('click', function() {
+                        sizeButtons.forEach(btn => btn.classList.remove('selected'));
+                        this.classList.add('selected');
+                        
+                        // Update variation ID
+                        variationInput.value = this.dataset.variationId;
+                        
+                        // Update quantity max
+                        const maxStock = parseInt(this.dataset.stock);
+                        quantityInput.max = maxStock;
+                        if (parseInt(quantityInput.value) > maxStock) {
+                            quantityInput.value = maxStock;
+                        }
+                        
+                        // Update price display
+                        const priceAdjustment = parseFloat(this.dataset.priceAdjustment) || 0;
+                        const basePrice = parseFloat(card.querySelector('.product-price').dataset.basePrice);
+                        const newPrice = basePrice + priceAdjustment;
+                        card.querySelector('.product-price').textContent = '₱' + newPrice.toFixed(2);
+                        
+                        // Enable buttons if quantity is valid
+                        updateButtonState();
+                    });
+                });
+
+                // Quantity controls
+                minusBtn.addEventListener('click', function() {
+                    let value = parseInt(quantityInput.value);
+                    if (value > 1) {
+                        quantityInput.value = value - 1;
+                        updateButtonState();
+                    }
+                });
+
+                plusBtn.addEventListener('click', function() {
+                    let value = parseInt(quantityInput.value);
+                    const maxStock = parseInt(quantityInput.max);
+                    if (value < maxStock) {
+                        quantityInput.value = value + 1;
+                        updateButtonState();
+                    } else {
+                        alert(`Only ${maxStock} items available in stock`);
+                    }
+                });
+
+                // Update button state
+                function updateButtonState() {
+                    const hasVariation = sizeButtons.length > 0;
+                    const sizeSelected = variationInput && variationInput.value !== '';
+                    const quantityValid = parseInt(quantityInput.value) > 0;
                     
-                    // Attach event listeners to modal elements
-                    attachModalListeners(productId);
-                });
-        }
+                    buyBtn.disabled = hasVariation && !sizeSelected || !quantityValid;
+                    cartBtn.disabled = hasVariation && !sizeSelected || !quantityValid;
+                }
 
-        function closeQuickView() {
-            modal.style.display = 'none';
-            document.body.style.overflow = 'auto';
-        }
-
-        closeModal.addEventListener('click', closeQuickView);
-
-        window.addEventListener('click', function(event) {
-            if (event.target === modal) {
-                closeQuickView();
-            }
-        });
-
-        // Size selection in modal
-        function attachModalListeners(productId) {
-            const sizeOptions = document.querySelectorAll('.size-option');
-            sizeOptions.forEach(option => {
-                option.addEventListener('click', function() {
-                    sizeOptions.forEach(opt => opt.classList.remove('selected'));
-                    this.classList.add('selected');
+                // Form submission
+                form.addEventListener('submit', function(e) {
+                    if (sizeButtons.length > 0 && (!variationInput || variationInput.value === '')) {
+                        e.preventDefault();
+                        alert('Please select a size');
+                        return;
+                    }
+                    if (!quantityInput.value || parseInt(quantityInput.value) <= 0) {
+                        e.preventDefault();
+                        alert('Please select a valid quantity');
+                        return;
+                    }
                 });
             });
+        }
 
-            // Quantity controls
-            const quantityInput = document.querySelector('.quantity-input');
-            const minusBtn = document.querySelector('.quantity-btn.minus');
-            const plusBtn = document.querySelector('.quantity-btn.plus');
-
-            minusBtn.addEventListener('click', function() {
-                let value = parseInt(quantityInput.value);
-                if (value > 1) {
-                    quantityInput.value = value - 1;
+        // Wishlist toggle
+        function toggleWishlist(productId, button) {
+            const action = button.classList.contains('active') ? 'remove' : 'add';
+            
+            fetch('shop.php', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                },
+                body: `product_id=${productId}&wishlist_action=${action}`
+            })
+            .then(response => {
+                if (response.redirected) {
+                    window.location.href = response.url;
                 }
             });
-
-            plusBtn.addEventListener('click', function() {
-                let value = parseInt(quantityInput.value);
-                quantityInput.value = value + 1;
-            });
-
-            // Modal action buttons
-            document.querySelector('.add-to-cart-modal')?.addEventListener('click', function() {
-                const quantity = parseInt(quantityInput.value);
-                const size = document.querySelector('.size-option.selected')?.textContent;
-                
-                // Submit the form with additional data
-                const formData = new FormData();
-                formData.append('product_id', productId);
-                formData.append('quantity', quantity);
-                if (size) formData.append('size', size);
-                formData.append('add_to_cart', '1');
-                
-                fetch('shop.php', {
-                    method: 'POST',
-                    body: formData
-                })
-                .then(response => {
-                    if (response.redirected) {
-                        window.location.href = response.url;
-                    } else {
-                        return response.text();
-                    }
-                })
-                .then(() => {
-                    updateCartCounter();
-                    closeQuickView();
-                });
-            });
-
-            document.querySelector('.buy-now-modal')?.addEventListener('click', function() {
-                const quantity = parseInt(quantityInput.value);
-                const size = document.querySelector('.size-option.selected')?.textContent;
-                
-                // Submit the form with additional data
-                const formData = new FormData();
-                formData.append('product_id', productId);
-                formData.append('quantity', quantity);
-                if (size) formData.append('size', size);
-                formData.append('buy_now', '1');
-                
-                fetch('shop.php', {
-                    method: 'POST',
-                    body: formData
-                })
-                .then(response => {
-                    if (response.redirected) {
-                        window.location.href = response.url;
-                    }
-                });
-            });
         }
 
-        // Attach event listeners to product cards
-        function attachEventListeners() {
-            // Product card click (for quick view)
-            document.querySelectorAll('.product-card').forEach(card => {
-                card.addEventListener('click', function(e) {
-                    // Only trigger if not clicking on a button
-                    if (!e.target.closest('button') && !e.target.closest('form')) {
-                        const productId = this.getAttribute('data-id');
-                        openQuickView(productId);
-                    }
-                });
-            });
-        }
-
-        // Initialize event listeners
-        attachEventListeners();
+        // Initialize on page load
+        document.addEventListener('DOMContentLoaded', initializeProductControls);
     </script>
 </body>
 </html>

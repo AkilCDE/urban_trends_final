@@ -24,82 +24,129 @@ class Auth {
     }
     
     public function register($email, $password, $firstname, $lastname, $address) {
-        $hashed_password = password_hash($password, PASSWORD_DEFAULT);
-        $stmt = $this->db->prepare("INSERT INTO users (email, password, firstname, lastname, address, is_admin) VALUES (?, ?, ?, ?, ?, 0)");
-        return $stmt->execute([$email, $hashed_password, $firstname, $lastname, $address]);
-    }
-    public function login($email, $password) {
-        $stmt = $this->db->prepare("SELECT * FROM users WHERE email = ?");
-        $stmt->execute([$email]);
-        $user = $stmt->fetch(PDO::FETCH_ASSOC);
-        
-        if ($user && password_verify($password, $user['password'])) {
-            $_SESSION['user_id'] = $user['id'];
-            $_SESSION['user_email'] = $user['email'];
-            $_SESSION['user_firstname'] = $user['firstname'];
-            $_SESSION['user_lastname'] = $user['lastname'];
-            $_SESSION['user_address'] = $user['address'];
-            $_SESSION['is_admin'] = $user['is_admin'];
-            return true;
+        try {
+            $hashed_password = password_hash($password, PASSWORD_DEFAULT);
+            $stmt = $this->db->prepare("INSERT INTO users (email, password, firstname, lastname, address, is_admin) VALUES (?, ?, ?, ?, ?, 0)");
+            return $stmt->execute([$email, $hashed_password, $firstname, $lastname, $address]);
+        } catch(PDOException $e) {
+            error_log("Registration error: " . $e->getMessage());
+            return false;
         }
-        return false;
+    }
+    
+    public function login($email, $password) {
+        try {
+            $stmt = $this->db->prepare("SELECT * FROM users WHERE email = ?");
+            $stmt->execute([$email]);
+            $user = $stmt->fetch(PDO::FETCH_ASSOC);
+            
+            if ($user && password_verify($password, $user['password'])) {
+                $_SESSION['user_id'] = $user['user_id'];
+                $_SESSION['user_email'] = $user['email'];
+                $_SESSION['user_firstname'] = $user['firstname'];
+                $_SESSION['user_lastname'] = $user['lastname'];
+                $_SESSION['user_address'] = $user['address'];
+                $_SESSION['is_admin'] = $user['is_admin'];
+                return true;
+            }
+            return false;
+        } catch(PDOException $e) {
+            error_log("Login error: " . $e->getMessage());
+            return false;
+        }
+    }
+    
+    public function isLoggedIn() {
+        return isset($_SESSION['user_id']);
+    }
+    
+    public function redirectIfLoggedIn() {
+        if ($this->isLoggedIn()) {
+            header("Location: index.php");
+            exit;
+        }
     }
 }
 
 $auth = new Auth($db);
+$auth->redirectIfLoggedIn();
+
 $errors = [];
+$formData = [
+    'email' => '',
+    'firstname' => '',
+    'lastname' => '',
+    'address' => ''
+];
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $email = htmlspecialchars($_POST['email']);
-    $password = htmlspecialchars($_POST['password']);
-    $confirm_password = htmlspecialchars($_POST['confirm_password']);
-    $firstname = htmlspecialchars($_POST['firstname']);
-    $lastname = htmlspecialchars($_POST['lastname']);
-    $address = htmlspecialchars($_POST['address']);
+    $formData = [
+        'email' => trim($_POST['email']),
+        'password' => trim($_POST['password']),
+        'confirm_password' => trim($_POST['confirm_password']),
+        'firstname' => trim($_POST['firstname']),
+        'lastname' => trim($_POST['lastname']),
+        'address' => trim($_POST['address'])
+    ];
 
     // Validate inputs
-    if (empty($email)) {
+    if (empty($formData['email'])) {
         $errors[] = 'Email is required';
-    } elseif (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
+    } elseif (!filter_var($formData['email'], FILTER_VALIDATE_EMAIL)) {
         $errors[] = 'Invalid email format';
     }
 
-    if (empty($password)) {
+    if (empty($formData['password'])) {
         $errors[] = 'Password is required';
-    } elseif (strlen($password) < 6) {
-        $errors[] = 'Password must be at least 6 characters';
+    } elseif (strlen($formData['password']) < 8) {
+        $errors[] = 'Password must be at least 8 characters';
     }
 
-    if ($password !== $confirm_password) {
+    if ($formData['password'] !== $formData['confirm_password']) {
         $errors[] = 'Passwords do not match';
     }
 
-    if (empty($firstname)) {
+    if (empty($formData['firstname'])) {
         $errors[] = 'First name is required';
     }
 
-    if (empty($lastname)) {
+    if (empty($formData['lastname'])) {
         $errors[] = 'Last name is required';
     }
 
-    if (empty($address)) {
+    if (empty($formData['address'])) {
         $errors[] = 'Address is required';
     }
 
     // Check if email exists
-    $stmt = $db->prepare("SELECT COUNT(*) FROM users WHERE email = ?");
-    $stmt->execute([$email]);
-    if ($stmt->fetchColumn() > 0) {
-        $errors[] = 'Email already exists';
+    if (empty($errors)) {
+        try {
+            $stmt = $db->prepare("SELECT COUNT(*) FROM users WHERE email = ?");
+            $stmt->execute([$formData['email']]);
+            if ($stmt->fetchColumn() > 0) {
+                $errors[] = 'Email already exists';
+            }
+        } catch(PDOException $e) {
+            $errors[] = 'Database error. Please try again.';
+            error_log("Email check error: " . $e->getMessage());
+        }
     }
 
     // If no errors, register user
     if (empty($errors)) {
-        if ($auth->register($email, $password, $firstname, $lastname, $address)) {
+        if ($auth->register(
+            $formData['email'],
+            $formData['password'],
+            $formData['firstname'],
+            $formData['lastname'],
+            $formData['address']
+        )) {
             // Auto-login after registration
-            if ($auth->login($email, $password)) {
+            if ($auth->login($formData['email'], $formData['password'])) {
                 header("Location: index.php");
                 exit;
+            } else {
+                $errors[] = 'Registration successful but login failed. Please login manually.';
             }
         } else {
             $errors[] = 'Registration failed. Please try again.';
@@ -113,186 +160,334 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Urban Trends Apparel - Register</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <style>
+        :root {
+            --primary-color: rgb(228, 6, 80);
+            --secondary-color: rgb(200, 0, 60);
+            --light-color:rgb(121, 162, 203);
+            --dark-color: #333;
+            --text-color: #555;
+            --error-color: #ff3333;
+            --error-bg: #ffeeee;
+            --border-color: #ddd;
+            --border-radius: 8px;
+            --box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+        }
+        
         * {
             margin: 0;
             padding: 0;
             box-sizing: border-box;
             font-family: 'Arial', sans-serif;
         }
+        
         body {
-            background-color: #f5f5f5;
+            background-color: var(--primary-color);
             display: flex;
             justify-content: center;
             align-items: center;
-            height: 100vh;
+            min-height: 100vh;
+            padding: 20px;
         }
-        .login-container {
+        
+        .register-container {
             background-color: white;
             padding: 40px;
-            border-radius: 10px;
-            box-shadow: 0 5px 15px rgba(0,0,0,0.1);
-            width: 350px;
+            border-radius: var(--border-radius);
+            box-shadow: var(--box-shadow);
+            width: 100%;
+            max-width: 500px;
             text-align: center;
         }
-        .login-container h1 {
-            color: #333;
-            margin-bottom: 20px;
-            font-size: 24px;
+        
+        .logo {
+            margin-bottom: 25px;
         }
-        .login-container p {
-            color: #666;
-            margin-bottom: 30px;
+        
+        .logo h1 {
+            color: var(--dark-color);
+            font-size: 28px;
+            margin-bottom: 5px;
+        }
+        
+        .logo p {
+            color: var(--text-color);
             font-size: 14px;
         }
-        .input-group {
+        
+        .error-message {
+            color: var(--error-color);
+            background-color: var(--error-bg);
+            padding: 12px;
+            border-radius: 5px;
             margin-bottom: 20px;
+            font-size: 14px;
             text-align: left;
         }
+        
+        .error-message p {
+            margin: 5px 0;
+        }
+        
+        .form-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+        }
+        
+        .input-group {
+            margin-bottom: 15px;
+            text-align: left;
+        }
+        
+        .input-group.full-width {
+            grid-column: span 2;
+        }
+        
         .input-group label {
             display: block;
-            margin-bottom: 5px;
-            color: #555;
+            margin-bottom: 8px;
+            color: var(--dark-color);
             font-size: 14px;
+            font-weight: 500;
         }
+        
         .input-group input,
         .input-group textarea {
             width: 100%;
-            padding: 12px;
-            border: 1px solid #ddd;
+            padding: 12px 15px;
+            border: 1px solid var(--border-color);
             border-radius: 5px;
-            box-sizing: border-box;
             font-size: 14px;
+            transition: border-color 0.3s;
         }
+        
+        .input-group input:focus,
+        .input-group textarea:focus {
+            outline: none;
+            border-color: var(--primary-color);
+            box-shadow: 0 0 0 3px rgba(228, 6, 80, 0.1);
+        }
+        
         .input-group textarea {
-            height: 80px;
+            height: 100px;
             resize: vertical;
         }
-        .checkbox-group {
+        
+        .password-container {
+        position: relative;
+    }
+    
+    .password-toggle {
+        position: absolute;
+        right: 12px;
+        top: 50%;
+        transform: translateY(-50%);
+        cursor: pointer;
+        color: var(--text-color);
+        background: none;
+        border: none;
+        padding: 0;
+        width: 20px;
+        height: 20px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+    }
+
+    .input-group input {
+        padding-right: 40px; /* Make room for the eye icon */
+    }
+       
+    
+     
+        .options {
             display: flex;
             align-items: center;
-            margin-bottom: 15px;
-        }
-        .checkbox-group input {
-            width: auto;
-            margin-right: 10px;
-        }
-        .checkbox-group label {
-            color: #555;
+            margin: 20px 0;
             font-size: 14px;
-            cursor: pointer;
         }
+        
+        .options input {
+            margin-right: 8px;
+            accent-color: var(--primary-color);
+        }
+        
         .btn {
-            display: block;
             width: 100%;
-            padding: 12px;
-            background-color: #333;
+            padding: 14px;
+            background-color: var(--primary-color);
             color: white;
             border: none;
             border-radius: 5px;
-            cursor: pointer;
             font-size: 16px;
-            margin: 20px 0;
+            font-weight: 600;
+            cursor: pointer;
             transition: background-color 0.3s;
+            margin-bottom: 20px;
         }
+        
         .btn:hover {
-            background-color: #555;
+            background-color: var(--secondary-color);
         }
-        .register-link {
-            margin-top: 20px;
-            color: #555;
+        
+        .login-link {
+            color: var(--text-color);
             font-size: 14px;
         }
-        .register-link a {
-            color: #333;
-            font-weight: bold;
+        
+        .login-link a {
+            color: var(--primary-color);
+            font-weight: 600;
             text-decoration: none;
+            transition: color 0.3s;
         }
-        .register-link a:hover {
+        
+        .login-link a:hover {
+            color: var(--secondary-color);
             text-decoration: underline;
         }
-        .error-message {
-            color: #ff3333;
-            margin-bottom: 15px;
-            padding: 10px;
-            background-color: #ffeeee;
-            border-radius: 5px;
-            font-size: 14px;
-        }
-        .error-message p {
-            margin: 5px 0;
-            font-size: 14px;
-            color: #ff3333;
+        
+        @media (max-width: 600px) {
+            .form-grid {
+                grid-template-columns: 1fr;
+            }
+            
+            .input-group.full-width {
+                grid-column: span 1;
+            }
+            
+            .register-container {
+                padding: 30px 20px;
+            }
         }
     </style>
 </head>
 <body>
-    <div class="login-container">
-        <h1>Trends Wear</h1>
-        <p>Urban trends apparel</p>
+    <div class="register-container">
+        <div class="logo">
+            <h1>Urban Trends Apparel</h1>
+            <p>Create your account</p>
+        </div>
         
         <?php if (!empty($errors)): ?>
             <div class="error-message">
                 <?php foreach ($errors as $error): ?>
-                    <p><?php echo $error; ?></p>
+                    <p><?php echo htmlspecialchars($error); ?></p>
                 <?php endforeach; ?>
             </div>
         <?php endif; ?>
         
         <form id="registerForm" method="POST">
-            <div class="input-group">
-                <label for="email">Email:</label>
-                <input type="email" id="email" name="email" required value="<?php echo $_POST['email'] ?? ''; ?>">
+            <div class="form-grid">
+                <div class="input-group">
+                    <label for="firstname">First Name</label>
+                    <input type="text" id="firstname" name="firstname" required 
+                           value="<?php echo htmlspecialchars($formData['firstname']); ?>">
+                </div>
+                
+                <div class="input-group">
+                    <label for="lastname">Last Name</label>
+                    <input type="text" id="lastname" name="lastname" required 
+                           value="<?php echo htmlspecialchars($formData['lastname']); ?>">
+                </div>
+                
+                <div class="input-group full-width">
+                    <label for="email">Email Address</label>
+                    <input type="email" id="email" name="email" required 
+                           value="<?php echo htmlspecialchars($formData['email']); ?>">
+                </div>
+                
+                <div class="input-group">
+    <label for="password">Password</label>
+    <div class="password-container">
+        <input type="password" id="password" name="password" required>
+        <button type="button" class="password-toggle" id="togglePassword">
+            <i class="fas fa-eye"></i>
+        </button>
+    </div>
+</div>
+                
+<div class="input-group">
+    <label for="confirm_password">Confirm Password</label>
+    <div class="password-container">
+        <input type="password" id="confirm_password" name="confirm_password" required>
+        <button type="button" class="password-toggle" id="toggleConfirmPassword">
+            <i class="fas fa-eye"></i>
+        </button>
+    </div>
+</div>
+                
+                <div class="input-group full-width">
+                    <label for="address">Address</label>
+                    <textarea id="address" name="address" required><?php echo htmlspecialchars($formData['address']); ?></textarea>
+                </div>
             </div>
             
-            <div class="input-group">
-                <label for="password">Password:</label>
-                <input type="password" id="password" name="password" required>
-            </div>
             
-            <div class="input-group">
-                <label for="confirm_password">Confirm Password:</label>
-                <input type="password" id="confirm_password" name="confirm_password" required>
-            </div>
-            
-            <div class="input-group">
-                <label for="firstname">First Name:</label>
-                <input type="text" id="firstname" name="firstname" required value="<?php echo $_POST['firstname'] ?? ''; ?>">
-            </div>
-            
-            <div class="input-group">
-                <label for="lastname">Last Name:</label>
-                <input type="text" id="lastname" name="lastname" required value="<?php echo $_POST['lastname'] ?? ''; ?>">
-            </div>
-            
-            <div class="input-group">
-                <label for="address">Address:</label>
-                <textarea id="address" name="address" required><?php echo $_POST['address'] ?? ''; ?></textarea>
-            </div>
-            
-            <div class="checkbox-group">
-                <input type="checkbox" id="showPassword">
-                <label for="showPassword">Show password</label>
-            </div>
             
             <button type="submit" class="btn">Register</button>
             
-            <div class="register-link">
-                Already have an account? <a href="login.php">login here</a>
+            <div class="login-link">
+                Already have an account? <a href="login.php">Login here</a>
             </div>
         </form>
     </div>
 
     <script>
-        // Show password toggle
-        const showPassword = document.getElementById('showPassword');
-        const passwordField = document.getElementById('password');
-        const confirmPasswordField = document.getElementById('confirm_password');
+        // Toggle password visibility
+        const togglePassword = document.getElementById('togglePassword');
+        const toggleConfirmPassword = document.getElementById('toggleConfirmPassword');
+        const passwordInput = document.getElementById('password');
+        const confirmPasswordInput = document.getElementById('confirm_password');
+        const showPasswordsCheckbox = document.getElementById('showPasswords');
         
-        showPassword.addEventListener('change', function() {
+        function togglePasswordVisibility(inputElement, iconElement) {
+            const type = inputElement.getAttribute('type') === 'password' ? 'text' : 'password';
+            inputElement.setAttribute('type', type);
+            iconElement.classList.toggle('fa-eye-slash');
+        }
+        
+        togglePassword.addEventListener('click', function() {
+            togglePasswordVisibility(passwordInput, this);
+        });
+        
+        toggleConfirmPassword.addEventListener('click', function() {
+            togglePasswordVisibility(confirmPasswordInput, this);
+        });
+        
+        showPasswordsCheckbox.addEventListener('change', function() {
             const type = this.checked ? 'text' : 'password';
-            passwordField.type = type;
-            confirmPasswordField.type = type;
+            passwordInput.setAttribute('type', type);
+            confirmPasswordInput.setAttribute('type', type);
+            
+            if (this.checked) {
+                togglePassword.classList.add('fa-eye-slash');
+                toggleConfirmPassword.classList.add('fa-eye-slash');
+            } else {
+                togglePassword.classList.remove('fa-eye-slash');
+                toggleConfirmPassword.classList.remove('fa-eye-slash');
+            }
+        });
+        
+        // Form validation
+        const registerForm = document.getElementById('registerForm');
+        const errorMessage = document.querySelector('.error-message');
+        
+        registerForm.addEventListener('submit', function(e) {
+            const password = document.getElementById('password').value;
+            const confirmPassword = document.getElementById('confirm_password').value;
+            
+            if (password !== confirmPassword) {
+                e.preventDefault();
+                if (!errorMessage) {
+                    const newError = document.createElement('div');
+                    newError.className = 'error-message';
+                    newError.innerHTML = '<p>Passwords do not match</p>';
+                    registerForm.insertBefore(newError, registerForm.firstChild);
+                }
+            }
         });
     </script>
 </body>

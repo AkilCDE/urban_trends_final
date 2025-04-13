@@ -29,7 +29,7 @@ class Auth {
     
     public function getCurrentUser() {
         if (!$this->isLoggedIn()) return null;
-        $stmt = $this->db->prepare("SELECT * FROM users WHERE id = ?");
+        $stmt = $this->db->prepare("SELECT * FROM users WHERE user_id = ?");
         $stmt->execute([$_SESSION['user_id']]);
         return $stmt->fetch(PDO::FETCH_ASSOC);
     }
@@ -60,7 +60,7 @@ if (!$auth->isLoggedIn()) {
 }
 
 $user = $auth->getCurrentUser();
-$user['wallet_balance'] = $auth->getWalletBalance($user['id']);
+$user['wallet_balance'] = $auth->getWalletBalance($user['user_id']);
 $page_title = 'Profile';
 $message = '';
 
@@ -84,19 +84,31 @@ function display_error($msg) {
 }
 
 function getWishlistItems($db, $user_id) {
-    $stmt = $db->prepare("SELECT p.* FROM wishlist w JOIN products p ON w.product_id = p.id WHERE w.user_id = ?");
+    $stmt = $db->prepare("SELECT p.*, 
+                         (SELECT SUM(stock) FROM product_variations WHERE product_id = p.product_id) as total_variation_stock
+                         FROM wishlist w 
+                         JOIN products p ON w.product_id = p.product_id 
+                         WHERE w.user_id = ?");
     $stmt->execute([$user_id]);
     return $stmt->fetchAll(PDO::FETCH_ASSOC);
 }
 
 function getCartItems($db, $user_id) {
-    $stmt = $db->prepare("SELECT c.*, p.name, p.price, p.image FROM cart c JOIN products p ON c.product_id = p.id WHERE c.user_id = ?");
+    $stmt = $db->prepare("SELECT c.*, p.name, p.price, p.image, pv.size, pv.price_adjustment 
+                         FROM cart c 
+                         JOIN products p ON c.product_id = p.product_id 
+                         LEFT JOIN product_variations pv ON c.variation_id = pv.variation_id
+                         WHERE c.user_id = ?");
     $stmt->execute([$user_id]);
     return $stmt->fetchAll(PDO::FETCH_ASSOC);
 }
 
 function getOrderItems($db, $order_id) {
-    $stmt = $db->prepare("SELECT oi.*, p.name, p.image FROM order_items oi JOIN products p ON oi.product_id = p.id WHERE oi.order_id = ?");
+    $stmt = $db->prepare("SELECT oi.*, p.name, p.image, p.description, pv.size, pv.price_adjustment 
+                         FROM order_items oi 
+                         JOIN products p ON oi.product_id = p.product_id 
+                         LEFT JOIN product_variations pv ON oi.variation_id = pv.variation_id
+                         WHERE oi.order_id = ?");
     $stmt->execute([$order_id]);
     return $stmt->fetchAll(PDO::FETCH_ASSOC);
 }
@@ -126,7 +138,7 @@ function processReturn($db, $order_id, $user_id) {
         $db->beginTransaction();
         
         // 1. Check if the order exists and belongs to the user
-        $stmt = $db->prepare("SELECT * FROM orders WHERE id = ? AND user_id = ?");
+        $stmt = $db->prepare("SELECT * FROM orders WHERE order_id = ? AND user_id = ?");
         $stmt->execute([$order_id, $user_id]);
         $order = $stmt->fetch(PDO::FETCH_ASSOC);
         
@@ -140,7 +152,7 @@ function processReturn($db, $order_id, $user_id) {
         }
         
         // 3. Update order status to 'return_requested'
-        $stmt = $db->prepare("UPDATE orders SET status = 'return_requested' WHERE id = ?");
+        $stmt = $db->prepare("UPDATE orders SET status = 'return_requested' WHERE order_id = ?");
         $stmt->execute([$order_id]);
         
         // 4. Add to order status history
@@ -175,8 +187,8 @@ function processRefund($db, $order_id, $user_id) {
         // 1. Check if the order exists, belongs to the user, and is eligible for refund
         $stmt = $db->prepare("SELECT o.*, p.payment_method, p.transaction_id 
                              FROM orders o 
-                             JOIN payments p ON o.id = p.order_id 
-                             WHERE o.id = ? AND o.user_id = ? AND o.status = 'returned'");
+                             JOIN payments p ON o.order_id = p.order_id 
+                             WHERE o.order_id = ? AND o.user_id = ? AND o.status = 'returned'");
         $stmt->execute([$order_id, $user_id]);
         $order = $stmt->fetch(PDO::FETCH_ASSOC);
         
@@ -206,7 +218,7 @@ function processRefund($db, $order_id, $user_id) {
         }
         
         // 4. Update order status to 'refunded'
-        $stmt = $db->prepare("UPDATE orders SET status = 'refunded' WHERE id = ?");
+        $stmt = $db->prepare("UPDATE orders SET status = 'refunded' WHERE order_id = ?");
         $stmt->execute([$order_id]);
         
         // 5. Update payment status
@@ -245,14 +257,14 @@ function getOrderHistory($db, $user_id, $order_id = null) {
                    s.tracking_number, s.carrier, s.shipping_method, s.status as shipping_status,
                    s.estimated_delivery, s.actual_delivery
             FROM orders o
-            LEFT JOIN payments p ON o.id = p.order_id
-            LEFT JOIN shipping s ON o.id = s.order_id
+            LEFT JOIN payments p ON o.order_id = p.order_id
+            LEFT JOIN shipping s ON o.order_id = s.order_id
             WHERE o.user_id = ?";
     
     $params = [$user_id];
     
     if ($order_id) {
-        $sql .= " AND o.id = ?";
+        $sql .= " AND o.order_id = ?";
         $params[] = $order_id;
     }
     
@@ -265,37 +277,99 @@ function getOrderHistory($db, $user_id, $order_id = null) {
     // Get order items and status history for each order
     foreach ($orders as &$order) {
         // Get order items
-        $stmt = $db->prepare("SELECT oi.*, p.name, p.image, p.description 
+        $stmt = $db->prepare("SELECT oi.*, p.name, p.image, p.description, pv.size, pv.price_adjustment 
                              FROM order_items oi 
-                             JOIN products p ON oi.product_id = p.id 
+                             JOIN products p ON oi.product_id = p.product_id 
+                             LEFT JOIN product_variations pv ON oi.variation_id = pv.variation_id
                              WHERE oi.order_id = ?");
-        $stmt->execute([$order['id']]);
+        $stmt->execute([$order['order_id']]);
         $order['items'] = $stmt->fetchAll(PDO::FETCH_ASSOC);
         
         // Get status history
         $stmt = $db->prepare("SELECT * FROM order_status_history 
                              WHERE order_id = ? 
                              ORDER BY changed_at DESC");
-        $stmt->execute([$order['id']]);
+        $stmt->execute([$order['order_id']]);
         $order['status_history'] = $stmt->fetchAll(PDO::FETCH_ASSOC);
         
         // Get promotions if any
         $stmt = $db->prepare("SELECT op.*, pr.code, pr.description as promo_description, pr.discount_type, pr.discount_value
                              FROM order_promotions op 
-                             JOIN promotions pr ON op.promotion_id = pr.id 
+                             JOIN promotions pr ON op.promotion_id = pr.promotion_id 
                              WHERE op.order_id = ?");
-        $stmt->execute([$order['id']]);
+        $stmt->execute([$order['order_id']]);
         $order['promotions'] = $stmt->fetchAll(PDO::FETCH_ASSOC);
         
         // Get return information if applicable
         if (in_array($order['status'], ['return_requested', 'returned', 'refunded'])) {
             $stmt = $db->prepare("SELECT * FROM support_tickets WHERE order_id = ?");
-            $stmt->execute([$order['id']]);
+            $stmt->execute([$order['order_id']]);
             $order['return_ticket'] = $stmt->fetch(PDO::FETCH_ASSOC);
         }
     }
     
     return $order_id ? ($orders[0] ?? null) : $orders;
+}
+
+// Get support tickets for the user
+function getSupportTickets($db, $user_id) {
+    $stmt = $db->prepare("SELECT t.*, 
+                         COUNT(r.response_id) as response_count,
+                         MAX(r.created_at) as last_response_date
+                         FROM support_tickets t
+                         LEFT JOIN ticket_responses r ON t.ticket_id = r.ticket_id
+                         WHERE t.user_id = ?
+                         GROUP BY t.ticket_id
+                         ORDER BY t.created_at DESC");
+    $stmt->execute([$user_id]);
+    return $stmt->fetchAll(PDO::FETCH_ASSOC);
+}
+
+// Get ticket details with responses
+function getTicketDetails($db, $ticket_id, $user_id) {
+    // Get ticket info
+    $stmt = $db->prepare("SELECT * FROM support_tickets WHERE ticket_id = ? AND user_id = ?");
+    $stmt->execute([$ticket_id, $user_id]);
+    $ticket = $stmt->fetch(PDO::FETCH_ASSOC);
+    
+    if (!$ticket) {
+        return null;
+    }
+    
+    // Get responses
+    $stmt = $db->prepare("SELECT r.*, u.firstname, u.lastname, u.is_admin 
+                         FROM ticket_responses r
+                         JOIN users u ON r.user_id = u.user_id
+                         WHERE r.ticket_id = ?
+                         ORDER BY r.created_at ASC");
+    $stmt->execute([$ticket_id]);
+    $ticket['responses'] = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    
+    return $ticket;
+}
+
+// Get product reviews for the user
+function getUserReviews($db, $user_id) {
+    $stmt = $db->prepare("SELECT r.*, p.name as product_name, p.image as product_image
+                         FROM product_reviews r
+                         JOIN products p ON r.product_id = p.product_id
+                         WHERE r.user_id = ?
+                         ORDER BY r.created_at DESC");
+    $stmt->execute([$user_id]);
+    return $stmt->fetchAll(PDO::FETCH_ASSOC);
+}
+
+// Get product details for review
+function getProductForReview($db, $product_id, $user_id) {
+    $stmt = $db->prepare("SELECT p.*, 
+                         (SELECT o.order_id FROM orders o 
+                          JOIN order_items oi ON o.order_id = oi.order_id 
+                          WHERE o.user_id = ? AND oi.product_id = p.product_id 
+                          AND o.status = 'delivered' LIMIT 1) as order_id
+                         FROM products p
+                         WHERE p.product_id = ?");
+    $stmt->execute([$user_id, $product_id]);
+    return $stmt->fetch(PDO::FETCH_ASSOC);
 }
 
 // Handle form submissions
@@ -310,7 +384,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     VALUES (?, ?)
                     ON DUPLICATE KEY UPDATE balance = balance + ?
                 ");
-                $stmt->execute([$user['id'], $amount, $amount]);
+                $stmt->execute([$user['user_id'], $amount, $amount]);
                 
                 $_SESSION['success_message'] = "Successfully added ₱" . number_format($amount, 2) . " to your wallet!";
                 header("Location: profile.php#wallet");
@@ -326,7 +400,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     // Handle return requests
     if (isset($_POST['order_action']) && $_POST['order_action'] === 'return') {
         $order_id = intval($_POST['order_id']);
-        $result = processReturn($db, $order_id, $user['id']);
+        $result = processReturn($db, $order_id, $user['user_id']);
         
         if ($result === true) {
             $_SESSION['success_message'] = "Return request submitted successfully. Our team will contact you soon.";
@@ -340,7 +414,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     // Handle refund requests (admin would typically handle this, but adding for completeness)
     if (isset($_POST['refund_action']) && $_POST['refund_action'] === 'process_refund') {
         $order_id = intval($_POST['order_id']);
-        $result = processRefund($db, $order_id, $user['id']);
+        $result = processRefund($db, $order_id, $user['user_id']);
         
         if ($result === true) {
             $_SESSION['success_message'] = "Refund processed successfully.";
@@ -359,8 +433,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $address = sanitize($_POST['address']);
         
         try {
-            $stmt = $db->prepare("UPDATE users SET firstname = ?, lastname = ?, phone = ?, address = ? WHERE id = ?");
-            $stmt->execute([$firstname, $lastname, $phone, $address, $user['id']]);
+            $stmt = $db->prepare("UPDATE users SET firstname = ?, lastname = ?, phone = ?, address = ? WHERE user_id = ?");
+            $stmt->execute([$firstname, $lastname, $phone, $address, $user['user_id']]);
             
             $_SESSION['success_message'] = "Profile updated successfully!";
             header("Location: profile.php#edit-profile");
@@ -377,8 +451,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $confirm_password = $_POST['confirm_password'];
         
         // Verify current password
-        $stmt = $db->prepare("SELECT password FROM users WHERE id = ?");
-        $stmt->execute([$user['id']]);
+        $stmt = $db->prepare("SELECT password FROM users WHERE user_id = ?");
+        $stmt->execute([$user['user_id']]);
         $result = $stmt->fetch(PDO::FETCH_ASSOC);
         
         if (!password_verify($current_password, $result['password'])) {
@@ -390,8 +464,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         } else {
             try {
                 $hashed_password = password_hash($new_password, PASSWORD_DEFAULT);
-                $stmt = $db->prepare("UPDATE users SET password = ? WHERE id = ?");
-                $stmt->execute([$hashed_password, $user['id']]);
+                $stmt = $db->prepare("UPDATE users SET password = ? WHERE user_id = ?");
+                $stmt->execute([$hashed_password, $user['user_id']]);
                 
                 $_SESSION['success_message'] = "Password changed successfully!";
                 header("Location: profile.php#change-password");
@@ -405,11 +479,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     // Handle cart actions
     if (isset($_POST['cart_action'])) {
         $product_id = intval($_POST['product_id']);
+        $variation_id = isset($_POST['variation_id']) ? intval($_POST['variation_id']) : null;
         
         try {
             if ($_POST['cart_action'] === 'remove') {
-                $stmt = $db->prepare("DELETE FROM cart WHERE user_id = ? AND product_id = ?");
-                $stmt->execute([$user['id'], $product_id]);
+                $stmt = $db->prepare("DELETE FROM cart WHERE user_id = ? AND product_id = ? AND (variation_id = ? OR variation_id IS NULL)");
+                $stmt->execute([$user['user_id'], $product_id, $variation_id]);
                 
                 $_SESSION['success_message'] = "Item removed from cart.";
                 header("Location: profile.php#cart");
@@ -417,8 +492,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             } elseif ($_POST['cart_action'] === 'update') {
                 $quantity = intval($_POST['quantity']);
                 if ($quantity > 0) {
-                    $stmt = $db->prepare("UPDATE cart SET quantity = ? WHERE user_id = ? AND product_id = ?");
-                    $stmt->execute([$quantity, $user['id'], $product_id]);
+                    $stmt = $db->prepare("UPDATE cart SET quantity = ? WHERE user_id = ? AND product_id = ? AND (variation_id = ? OR variation_id IS NULL)");
+                    $stmt->execute([$quantity, $user['user_id'], $product_id, $variation_id]);
                     
                     $_SESSION['success_message'] = "Cart updated successfully!";
                     header("Location: profile.php#cart");
@@ -439,15 +514,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         try {
             if ($_POST['wishlist_action'] === 'remove') {
                 $stmt = $db->prepare("DELETE FROM wishlist WHERE user_id = ? AND product_id = ?");
-                $stmt->execute([$user['id'], $product_id]);
+                $stmt->execute([$user['user_id'], $product_id]);
                 
                 $_SESSION['success_message'] = "Item removed from wishlist.";
                 header("Location: profile.php#wishlist");
                 exit;
             } elseif ($_POST['wishlist_action'] === 'add') {
-                if (!isInWishlist($db, $user['id'], $product_id)) {
+                if (!isInWishlist($db, $user['user_id'], $product_id)) {
                     $stmt = $db->prepare("INSERT INTO wishlist (user_id, product_id) VALUES (?, ?)");
-                    $stmt->execute([$user['id'], $product_id]);
+                    $stmt->execute([$user['user_id'], $product_id]);
                     
                     $_SESSION['success_message'] = "Item added to wishlist!";
                     header("Location: profile.php#wishlist");
@@ -470,8 +545,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $db->beginTransaction();
             
             // Check if order belongs to user and can be cancelled
-            $stmt = $db->prepare("SELECT * FROM orders WHERE id = ? AND user_id = ? AND status IN ('pending', 'processing')");
-            $stmt->execute([$order_id, $user['id']]);
+            $stmt = $db->prepare("SELECT * FROM orders WHERE order_id = ? AND user_id = ? AND status IN ('pending', 'processing')");
+            $stmt->execute([$order_id, $user['user_id']]);
             $order = $stmt->fetch(PDO::FETCH_ASSOC);
             
             if (!$order) {
@@ -479,7 +554,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
             
             // Update order status
-            $stmt = $db->prepare("UPDATE orders SET status = 'cancelled' WHERE id = ?");
+            $stmt = $db->prepare("UPDATE orders SET status = 'cancelled' WHERE order_id = ?");
             $stmt->execute([$order_id]);
             
             // Add to status history
@@ -493,7 +568,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             // Refund to wallet if payment was from wallet
             if ($order['payment_method'] === 'wallet') {
                 $stmt = $db->prepare("UPDATE user_wallet SET balance = balance + ? WHERE user_id = ?");
-                $stmt->execute([$order['total_amount'], $user['id']]);
+                $stmt->execute([$order['total_amount'], $user['user_id']]);
             }
             
             // Commit transaction
@@ -507,16 +582,100 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $message = display_error($e->getMessage());
         }
     }
+    
+    // Handle support ticket submission
+    if (isset($_POST['submit_ticket'])) {
+        $subject = sanitize($_POST['subject']);
+        $message = sanitize($_POST['message']);
+        $order_id = isset($_POST['order_id']) ? intval($_POST['order_id']) : null;
+        
+        try {
+            $stmt = $db->prepare("INSERT INTO support_tickets (user_id, order_id, subject, message, status) VALUES (?, ?, ?, ?, 'open')");
+            $stmt->execute([$user['user_id'], $order_id, $subject, $message]);
+            
+            $_SESSION['success_message'] = "Support ticket submitted successfully! We'll get back to you soon.";
+            header("Location: profile.php#support");
+            exit;
+        } catch (Exception $e) {
+            $message = display_error("Failed to submit support ticket: " . $e->getMessage());
+        }
+    }
+    
+    // Handle ticket response submission
+    if (isset($_POST['submit_response'])) {
+        $ticket_id = intval($_POST['ticket_id']);
+        $response_message = sanitize($_POST['message']);
+        
+        try {
+            // Verify ticket belongs to user
+            $stmt = $db->prepare("SELECT ticket_id FROM support_tickets WHERE ticket_id = ? AND user_id = ?");
+            $stmt->execute([$ticket_id, $user['user_id']]);
+            if (!$stmt->fetch()) {
+                throw new Exception("Ticket not found or doesn't belong to you.");
+            }
+            
+            $stmt = $db->prepare("INSERT INTO ticket_responses (ticket_id, user_id, message, is_admin_response) VALUES (?, ?, ?, 0)");
+            $stmt->execute([$ticket_id, $user['user_id'], $response_message]);
+            
+            // Update ticket status to in_progress if it was closed
+            $stmt = $db->prepare("UPDATE support_tickets SET status = 'in_progress', updated_at = NOW() WHERE ticket_id = ?");
+            $stmt->execute([$ticket_id]);
+            
+            $_SESSION['success_message'] = "Your response has been submitted.";
+            header("Location: profile.php?ticket_id=$ticket_id#support");
+            exit;
+        } catch (Exception $e) {
+            $message = display_error("Failed to submit response: " . $e->getMessage());
+        }
+    }
+    
+    // Handle product review submission
+    if (isset($_POST['submit_review'])) {
+        $product_id = intval($_POST['product_id']);
+        $order_id = intval($_POST['order_id']);
+        $rating = intval($_POST['rating']);
+        $title = sanitize($_POST['title']);
+        $review = sanitize($_POST['review']);
+        
+        try {
+            // Verify user has purchased the product
+            $stmt = $db->prepare("SELECT oi.order_item_id 
+                                 FROM order_items oi
+                                 JOIN orders o ON oi.order_id = o.order_id
+                                 WHERE oi.order_id = ? AND oi.product_id = ? AND o.user_id = ? AND o.status = 'delivered'");
+            $stmt->execute([$order_id, $product_id, $user['user_id']]);
+            if (!$stmt->fetch()) {
+                throw new Exception("You can only review products you've purchased.");
+            }
+            
+            // Check if review already exists
+            $stmt = $db->prepare("SELECT review_id FROM product_reviews WHERE order_id = ? AND product_id = ? AND user_id = ?");
+            $stmt->execute([$order_id, $product_id, $user['user_id']]);
+            if ($stmt->fetch()) {
+                throw new Exception("You've already reviewed this product from this order.");
+            }
+            
+            $stmt = $db->prepare("INSERT INTO product_reviews (product_id, user_id, order_id, rating, title, review, is_approved) 
+                                 VALUES (?, ?, ?, ?, ?, ?, 0)");
+            $stmt->execute([$product_id, $user['user_id'], $order_id, $rating, $title, $review]);
+            
+            $_SESSION['success_message'] = "Thank you for your review! It will be visible after approval.";
+            header("Location: profile.php#reviews");
+            exit;
+        } catch (Exception $e) {
+            $message = display_error("Failed to submit review: " . $e->getMessage());
+        }
+    }
 }
 
 // Get user's order history
-$order_history = getOrderHistory($db, $user['id']);
+$order_history = getOrderHistory($db, $user['user_id']);
 
 // Get wishlist items
-$wishlist = getWishlistItems($db, $user['id']);
+$wishlist = getWishlistItems($db, $user['user_id']);
 
 // Get cart items
-$cart = getCartItems($db, $user['id']);
+$cart = getCartItems($db, $user['user_id']);
 
 // Get cart count
 $cart_count = 0;
@@ -525,6 +684,20 @@ if ($auth->isLoggedIn()) {
     $stmt->execute([$_SESSION['user_id']]);
     $cart_count = $stmt->fetchColumn();
 }
+
+// Get support tickets
+$support_tickets = getSupportTickets($db, $user['user_id']);
+
+// Get specific ticket if requested
+$ticket_id = isset($_GET['ticket_id']) ? intval($_GET['ticket_id']) : null;
+$current_ticket = $ticket_id ? getTicketDetails($db, $ticket_id, $user['user_id']) : null;
+
+// Get user reviews
+$user_reviews = getUserReviews($db, $user['user_id']);
+
+// Get product for review if requested
+$review_product_id = isset($_GET['review_product']) ? intval($_GET['review_product']) : null;
+$review_product = $review_product_id ? getProductForReview($db, $review_product_id, $user['user_id']) : null;
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -535,6 +708,7 @@ if ($auth->isLoggedIn()) {
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <style>
+        /* Previous CSS styles remain the same, adding new styles for support and reviews */
         :root {
             --primary-color: #1a1a1a;
             --secondary-color: #121212;
@@ -1447,6 +1621,300 @@ if ($auth->isLoggedIn()) {
                 grid-template-columns: 1fr;
             }
         }
+        /* Support Ticket Styles */
+        .ticket-list {
+            margin-top: 1.5rem;
+        }
+        
+        .ticket-item {
+            background-color: var(--secondary-color);
+            border-radius: var(--border-radius);
+            padding: 1.5rem;
+            margin-bottom: 1rem;
+            box-shadow: var(--box-shadow);
+            transition: var(--transition);
+        }
+        
+        .ticket-item:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.3);
+        }
+        
+        .ticket-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1rem;
+        }
+        
+        .ticket-subject {
+            font-size: 1.2rem;
+            font-weight: 600;
+            color: var(--accent-color);
+        }
+        
+        .ticket-meta {
+            display: flex;
+            gap: 1rem;
+            color: var(--text-muted);
+            font-size: 0.9rem;
+        }
+        
+        .ticket-status {
+            display: inline-block;
+            padding: 0.3rem 0.8rem;
+            border-radius: 20px;
+            font-size: 0.8rem;
+            font-weight: 500;
+        }
+        
+        .status-open {
+            background-color: rgba(255, 107, 107, 0.2);
+            color: var(--accent-color);
+        }
+        
+        .status-in_progress {
+            background-color: rgba(0, 123, 255, 0.2);
+            color: #4dabf7;
+        }
+        
+        .status-resolved {
+            background-color: rgba(40, 167, 69, 0.2);
+            color: #40c057;
+        }
+        
+        .status-closed {
+            background-color: rgba(108, 117, 125, 0.2);
+            color: #adb5bd;
+        }
+        
+        .ticket-message {
+            margin-bottom: 1rem;
+            line-height: 1.6;
+        }
+        
+        .ticket-order {
+            font-size: 0.9rem;
+            color: var(--text-muted);
+            margin-bottom: 1rem;
+        }
+        
+        .ticket-order a {
+            color: var(--accent-color);
+            text-decoration: none;
+        }
+        
+        .ticket-order a:hover {
+            text-decoration: underline;
+        }
+        
+        .ticket-footer {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 0.9rem;
+            color: var(--text-muted);
+        }
+        
+        .ticket-response-count {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+        
+        /* Ticket Conversation Styles */
+        .ticket-conversation {
+            margin-top: 2rem;
+        }
+        
+        .ticket-response {
+            background-color: var(--secondary-color);
+            border-radius: var(--border-radius);
+            padding: 1.5rem;
+            margin-bottom: 1.5rem;
+            position: relative;
+        }
+        
+        .response-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1rem;
+        }
+        
+        .response-user {
+            font-weight: 600;
+            color: var(--accent-color);
+        }
+        
+        .response-date {
+            color: var(--text-muted);
+            font-size: 0.9rem;
+        }
+        
+        .response-message {
+            line-height: 1.6;
+        }
+        
+        .response-admin {
+            border-left: 4px solid var(--accent-color);
+        }
+        
+        .response-customer {
+            border-left: 4px solid #4dabf7;
+        }
+        
+        /* Review Styles */
+        .review-list {
+            margin-top: 1.5rem;
+        }
+        
+        .review-item {
+            background-color: var(--secondary-color);
+            border-radius: var(--border-radius);
+            padding: 1.5rem;
+            margin-bottom: 1.5rem;
+            box-shadow: var(--box-shadow);
+        }
+        
+        .review-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1rem;
+        }
+        
+        .review-product {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+            margin-bottom: 1rem;
+        }
+        
+        .review-product-image {
+            width: 60px;
+            height: 60px;
+            object-fit: cover;
+            border-radius: var(--border-radius);
+        }
+        
+        .review-product-name {
+            font-weight: 600;
+        }
+        
+        .review-rating {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            margin-bottom: 0.5rem;
+        }
+        
+        .review-rating .stars {
+            color: #ffc107;
+        }
+        
+        .review-title {
+            font-size: 1.1rem;
+            font-weight: 600;
+            margin-bottom: 0.5rem;
+        }
+        
+        .review-content {
+            line-height: 1.6;
+            margin-bottom: 1rem;
+        }
+        
+        .review-footer {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            color: var(--text-muted);
+            font-size: 0.9rem;
+        }
+        
+        .review-status {
+            display: inline-block;
+            padding: 0.3rem 0.6rem;
+            border-radius: 20px;
+            font-size: 0.8rem;
+            font-weight: 500;
+        }
+        
+        .status-pending {
+            background-color: rgba(255, 193, 7, 0.2);
+            color: #ffc107;
+        }
+        
+        .status-approved {
+            background-color: rgba(40, 167, 69, 0.2);
+            color: #40c057;
+        }
+        
+        /* Review Form Styles */
+        .review-form-container {
+            background-color: var(--secondary-color);
+            border-radius: var(--border-radius);
+            padding: 2rem;
+            margin-top: 2rem;
+            box-shadow: var(--box-shadow);
+        }
+        
+        .review-product-card {
+            display: flex;
+            align-items: center;
+            gap: 1.5rem;
+            margin-bottom: 1.5rem;
+            padding-bottom: 1.5rem;
+            border-bottom: 1px solid #444;
+        }
+        
+        .review-product-image-large {
+            width: 100px;
+            height: 100px;
+            object-fit: cover;
+            border-radius: var(--border-radius);
+        }
+        
+        .rating-input {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 1.5rem;
+        }
+        
+        .rating-stars {
+            display: flex;
+            gap: 5px;
+        }
+        
+        .rating-stars input {
+            display: none;
+        }
+        
+        .rating-stars label {
+            font-size: 1.5rem;
+            color: #ccc;
+            cursor: pointer;
+            transition: var(--transition);
+        }
+        
+        .rating-stars input:checked ~ label {
+            color: #ffc107;
+        }
+        
+        .rating-stars label:hover,
+        .rating-stars label:hover ~ label {
+            color: #ffc107;
+        }
+        
+        /* New section links in sidebar */
+        .profile-sidebar li a i.fa-headset {
+            color: #4dabf7;
+        }
+        
+        .profile-sidebar li a i.fa-star {
+            color: #ffc107;
+        }
     </style>
 </head>
 <body>
@@ -1489,6 +1957,8 @@ if ($auth->isLoggedIn()) {
                 <li><a href="#orders"><i class="fas fa-clipboard-list"></i> My Orders</a></li>
                 <li><a href="#wishlist"><i class="fas fa-heart"></i> Wishlist (<?php echo count($wishlist); ?>)</a></li>
                 <li><a href="#returns"><i class="fas fa-exchange-alt"></i> Returns</a></li>
+                <li><a href="#support"><i class="fas fa-headset"></i> Support Tickets (<?php echo count($support_tickets); ?>)</a></li>
+                <li><a href="#reviews"><i class="fas fa-star"></i> My Reviews (<?php echo count($user_reviews); ?>)</a></li>
             </ul>
         </div>
         
@@ -1614,7 +2084,8 @@ if ($auth->isLoggedIn()) {
                             <?php 
                             $cart_total = 0;
                             foreach ($cart as $item): 
-                                $product_total = $item['price'] * $item['quantity'];
+                                $price = $item['price'] + ($item['price_adjustment'] ?? 0);
+                                $product_total = $price * $item['quantity'];
                                 $cart_total += $product_total;
                             ?>
                                 <tr>
@@ -1622,12 +2093,16 @@ if ($auth->isLoggedIn()) {
                                         <div style="display: flex; align-items: center; gap: 10px;">
                                             <img src="assets/images/products/<?php echo htmlspecialchars($item['image']); ?>" alt="<?php echo htmlspecialchars($item['name']); ?>" style="width: 50px; height: 50px; object-fit: cover;">
                                             <?php echo htmlspecialchars($item['name']); ?>
+                                            <?php if (!empty($item['size'])): ?>
+                                                <span style="font-size: 0.8rem; color: var(--text-muted);">(Size: <?php echo $item['size']; ?>)</span>
+                                            <?php endif; ?>
                                         </div>
                                     </td>
-                                    <td>₱<?php echo number_format($item['price'], 2); ?></td>
+                                    <td>₱<?php echo number_format($price, 2); ?></td>
                                     <td>
                                         <form method="POST" style="display: flex; align-items: center; gap: 5px;">
                                             <input type="hidden" name="product_id" value="<?php echo $item['product_id']; ?>">
+                                            <input type="hidden" name="variation_id" value="<?php echo $item['variation_id'] ?? null; ?>">
                                             <input type="hidden" name="cart_action" value="update">
                                             <input type="number" name="quantity" value="<?php echo $item['quantity']; ?>" min="1" style="width: 60px; padding: 5px;">
                                             <button type="submit" class="btn" style="padding: 5px 10px;"><i class="fas fa-sync-alt"></i></button>
@@ -1637,6 +2112,7 @@ if ($auth->isLoggedIn()) {
                                     <td>
                                         <form method="POST">
                                             <input type="hidden" name="product_id" value="<?php echo $item['product_id']; ?>">
+                                            <input type="hidden" name="variation_id" value="<?php echo $item['variation_id'] ?? null; ?>">
                                             <input type="hidden" name="cart_action" value="remove">
                                             <button type="submit" class="btn btn-danger" style="padding: 5px 10px;"><i class="fas fa-trash-alt"></i></button>
                                         </form>
@@ -1668,7 +2144,7 @@ if ($auth->isLoggedIn()) {
                             <div class="order-details-grid">
                                 <div class="order-detail-group">
                                     <h4><i class="fas fa-info-circle"></i> Order Information</h4>
-                                    <p><strong>Order #:</strong> <?php echo $order['id']; ?></p>
+                                    <p><strong>Order #:</strong> <?php echo $order['order_id']; ?></p>
                                     <p><strong>Date:</strong> <?php echo date('M d, Y h:i A', strtotime($order['order_date'])); ?></p>
                                     <p><strong>Status:</strong> 
                                         <span class="status-badge status-<?php echo $order['status']; ?>">
@@ -1730,14 +2206,20 @@ if ($auth->isLoggedIn()) {
                                         <img src="assets/images/products/<?php echo htmlspecialchars($item['image']); ?>" alt="<?php echo htmlspecialchars($item['name']); ?>" class="order-item-image">
                                         <div class="order-item-details">
                                             <h5><?php echo htmlspecialchars($item['name']); ?></h5>
+                                            <?php if (!empty($item['size'])): ?>
+                                                <p style="color: var(--text-muted); font-size: 0.9rem;">Size: <?php echo $item['size']; ?></p>
+                                            <?php endif; ?>
                                             <?php if (!empty($item['description'])): ?>
                                                 <p style="color: var(--text-muted); font-size: 0.9rem;"><?php echo htmlspecialchars($item['description']); ?></p>
                                             <?php endif; ?>
                                         </div>
                                         <div style="text-align: right;">
-                                            <p>₱<?php echo number_format($item['price'], 2); ?></p>
+                                            <?php 
+                                            $price = $item['price'] + ($item['price_adjustment'] ?? 0);
+                                            ?>
+                                            <p>₱<?php echo number_format($price, 2); ?></p>
                                             <p>x<?php echo $item['quantity']; ?></p>
-                                            <p class="order-item-price">₱<?php echo number_format($item['price'] * $item['quantity'], 2); ?></p>
+                                            <p class="order-item-price">₱<?php echo number_format($price * $item['quantity'], 2); ?></p>
                                         </div>
                                     </div>
                                 <?php endforeach; ?>
@@ -1779,16 +2261,33 @@ if ($auth->isLoggedIn()) {
                             <div style="margin-top: 1.5rem;">
                                 <?php if ($order['status'] === 'pending' || $order['status'] === 'processing'): ?>
                                     <form method="POST" style="display: inline-block;">
-                                        <input type="hidden" name="order_id" value="<?php echo $order['id']; ?>">
+                                        <input type="hidden" name="order_id" value="<?php echo $order['order_id']; ?>">
                                         <input type="hidden" name="order_action" value="cancel">
                                         <button type="submit" class="btn btn-danger"><i class="fas fa-times"></i> Cancel Order</button>
                                     </form>
                                 <?php elseif (canReturnOrder($order)): ?>
                                     <form method="POST" style="display: inline-block; margin-left: 0.5rem;">
-                                        <input type="hidden" name="order_id" value="<?php echo $order['id']; ?>">
+                                        <input type="hidden" name="order_id" value="<?php echo $order['order_id']; ?>">
                                         <input type="hidden" name="order_action" value="return">
                                         <button type="submit" class="btn btn-outline"><i class="fas fa-exchange-alt"></i> Request Return</button>
                                     </form>
+                                <?php endif; ?>
+                                
+                                <!-- Add review button for delivered orders -->
+                                <?php if ($order['status'] === 'delivered'): ?>
+                                    <?php foreach ($order['items'] as $item): ?>
+                                        <?php 
+                                        // Check if review already exists for this product in this order
+                                        $stmt = $db->prepare("SELECT review_id FROM product_reviews WHERE order_id = ? AND product_id = ? AND user_id = ?");
+                                        $stmt->execute([$order['order_id'], $item['product_id'], $user['user_id']]);
+                                        $has_review = $stmt->fetch();
+                                        ?>
+                                        <?php if (!$has_review): ?>
+                                            <a href="profile.php?review_product=<?php echo $item['product_id']; ?>#reviews" class="btn" style="margin-left: 0.5rem;">
+                                                <i class="fas fa-star"></i> Review <?php echo htmlspecialchars($item['name']); ?>
+                                            </a>
+                                        <?php endif; ?>
+                                    <?php endforeach; ?>
                                 <?php endif; ?>
                             </div>
                         </div>
@@ -1805,9 +2304,12 @@ if ($auth->isLoggedIn()) {
                     <div class="wishlist-items">
                         <?php foreach ($wishlist as $product): ?>
                             <div class="product-card">
-                                <?php if($product['stock'] < 10): ?>
-                                    <span class="product-badge">Only <?php echo $product['stock']; ?> left</span>
-                                <?php endif; ?>
+                            <?php 
+                            // Calculate available stock
+                            $available_stock = $product['total_variation_stock'] ?? 0;
+                            if ($available_stock > 0 && $available_stock < 10): ?>
+                                <span class="product-badge">Only <?php echo $available_stock; ?> left</span>
+                            <?php endif; ?>
                                 <div class="product-image-container">
                                     <img src="assets/images/products/<?php echo htmlspecialchars($product['image']); ?>" alt="<?php echo htmlspecialchars($product['name']); ?>" class="product-image">
                                 </div>
@@ -1816,19 +2318,19 @@ if ($auth->isLoggedIn()) {
                                     <p class="product-price">₱<?php echo number_format($product['price'], 2); ?></p>
                                     <div class="product-actions">
                                         <form method="POST" style="display: inline;">
-                                            <input type="hidden" name="product_id" value="<?php echo $product['id']; ?>">
+                                            <input type="hidden" name="product_id" value="<?php echo $product['product_id']; ?>">
                                             <button type="submit" name="buy_now" class="action-btn buy-now">
                                                 <i class="fas fa-bolt"></i> Buy Now
                                             </button>
                                         </form>
                                         <form method="POST" style="display: inline;">
-                                            <input type="hidden" name="product_id" value="<?php echo $product['id']; ?>">
+                                            <input type="hidden" name="product_id" value="<?php echo $product['product_id']; ?>">
                                             <button type="submit" name="add_to_cart" class="action-btn add-to-cart">
                                                 <i class="fas fa-cart-plus"></i> Add to Cart
                                             </button>
                                         </form>
                                         <form method="POST" style="display: inline;">
-                                            <input type="hidden" name="product_id" value="<?php echo $product['id']; ?>">
+                                            <input type="hidden" name="product_id" value="<?php echo $product['product_id']; ?>">
                                             <input type="hidden" name="wishlist_action" value="remove">
                                             <button type="submit" class="wishlist-btn active">
                                                 <i class="fas fa-heart"></i>
@@ -1858,7 +2360,7 @@ if ($auth->isLoggedIn()) {
                             <div class="order-details-grid">
                                 <div class="order-detail-group">
                                     <h4><i class="fas fa-info-circle"></i> Return Information</h4>
-                                    <p><strong>Order #:</strong> <?php echo $order['id']; ?></p>
+                                    <p><strong>Order #:</strong> <?php echo $order['order_id']; ?></p>
                                     <p><strong>Date:</strong> <?php echo date('M d, Y', strtotime($order['order_date'])); ?></p>
                                     <p><strong>Status:</strong> 
                                         <span class="status-badge status-<?php echo $order['status']; ?>">
@@ -1873,7 +2375,7 @@ if ($auth->isLoggedIn()) {
                                         </span>
                                     </p>
                                     <?php if (!empty($order['return_ticket'])): ?>
-                                        <p><strong>Ticket #:</strong> <?php echo $order['return_ticket']['id']; ?></p>
+                                        <p><strong>Ticket #:</strong> <?php echo $order['return_ticket']['ticket_id']; ?></p>
                                     <?php endif; ?>
                                 </div>
                                 
@@ -1920,14 +2422,20 @@ if ($auth->isLoggedIn()) {
                                         <img src="assets/images/products/<?php echo htmlspecialchars($item['image']); ?>" alt="<?php echo htmlspecialchars($item['name']); ?>" class="order-item-image">
                                         <div class="order-item-details">
                                             <h5><?php echo htmlspecialchars($item['name']); ?></h5>
+                                            <?php if (!empty($item['size'])): ?>
+                                                <p style="color: var(--text-muted); font-size: 0.9rem;">Size: <?php echo $item['size']; ?></p>
+                                            <?php endif; ?>
                                             <?php if (!empty($item['description'])): ?>
                                                 <p style="color: var(--text-muted); font-size: 0.9rem;"><?php echo htmlspecialchars($item['description']); ?></p>
                                             <?php endif; ?>
                                         </div>
                                         <div style="text-align: right;">
-                                            <p>₱<?php echo number_format($item['price'], 2); ?></p>
+                                            <?php 
+                                            $price = $item['price'] + ($item['price_adjustment'] ?? 0);
+                                            ?>
+                                            <p>₱<?php echo number_format($price, 2); ?></p>
                                             <p>x<?php echo $item['quantity']; ?></p>
-                                            <p class="order-item-price">₱<?php echo number_format($item['price'] * $item['quantity'], 2); ?></p>
+                                            <p class="order-item-price">₱<?php echo number_format($price * $item['quantity'], 2); ?></p>
                                         </div>
                                     </div>
                                 <?php endforeach; ?>
@@ -1959,7 +2467,7 @@ if ($auth->isLoggedIn()) {
                             <?php if ($order['status'] === 'returned' && $order['payment_method'] === 'wallet'): ?>
                                 <div style="margin-top: 1.5rem;">
                                     <form method="POST">
-                                        <input type="hidden" name="order_id" value="<?php echo $order['id']; ?>">
+                                        <input type="hidden" name="order_id" value="<?php echo $order['order_id']; ?>">
                                         <input type="hidden" name="refund_action" value="process_refund">
                                         <button type="submit" class="btn"><i class="fas fa-money-bill-wave"></i> Process Refund to Wallet</button>
                                     </form>
@@ -1991,6 +2499,276 @@ if ($auth->isLoggedIn()) {
                         <li><strong>Cash on Delivery:</strong> Bank transfer refund (provide details via support ticket)</li>
                     </ul>
                 </div>
+            </div>
+            
+            <!-- Support Tickets Section -->
+            <div id="support" class="profile-section" style="display: none;">
+                <h3><i class="fas fa-headset"></i> Support Tickets</h3>
+                
+                <?php if ($current_ticket): ?>
+                    <!-- Ticket Conversation View -->
+                    <div class="ticket-details">
+                        <div class="ticket-header">
+                            <h4 class="ticket-subject"><?php echo htmlspecialchars($current_ticket['subject']); ?></h4>
+                            <span class="ticket-status status-<?php echo str_replace(' ', '_', strtolower($current_ticket['status'])); ?>">
+                                <?php echo ucfirst(str_replace('_', ' ', $current_ticket['status'])); ?>
+                            </span>
+                        </div>
+                        
+                        <?php if ($current_ticket['order_id']): ?>
+                            <div class="ticket-order">
+                                Related to Order #<?php echo $current_ticket['order_id']; ?>
+                                <a href="profile.php#orders">View Order</a>
+                            </div>
+                        <?php endif; ?>
+                        
+                        <div class="ticket-message">
+                            <p><?php echo nl2br(htmlspecialchars($current_ticket['message'])); ?></p>
+                        </div>
+                        
+                        <div class="ticket-footer">
+                            <div>
+                                Created: <?php echo date('M d, Y h:i A', strtotime($current_ticket['created_at'])); ?>
+                            </div>
+                            <div>
+                                Last updated: <?php echo date('M d, Y h:i A', strtotime($current_ticket['updated_at'] ?? $current_ticket['created_at'])); ?>
+                            </div>
+                        </div>
+                        
+                        <div class="ticket-conversation">
+                            <h4>Conversation</h4>
+                            
+                            <?php if (empty($current_ticket['responses'])): ?>
+                                <p>No responses yet.</p>
+                            <?php else: ?>
+                                <?php foreach ($current_ticket['responses'] as $response): ?>
+                                    <div class="ticket-response <?php echo $response['is_admin_response'] ? 'response-admin' : 'response-customer'; ?>">
+                                        <div class="response-header">
+                                            <div class="response-user">
+                                                <?php echo htmlspecialchars($response['firstname'] . ' ' . htmlspecialchars($response['lastname'])); ?>
+                                                <?php if ($response['is_admin_response']): ?>
+                                                    <span style="color: var(--accent-color);">(Admin)</span>
+                                                <?php endif; ?>
+                                            </div>
+                                            <div class="response-date">
+                                                <?php echo date('M d, Y h:i A', strtotime($response['created_at'])); ?>
+                                            </div>
+                                        </div>
+                                        <div class="response-message">
+                                            <?php echo nl2br(htmlspecialchars($response['message'])); ?>
+                                        </div>
+                                    </div>
+                                <?php endforeach; ?>
+                            <?php endif; ?>
+                            
+                            <?php if ($current_ticket['status'] !== 'closed'): ?>
+                                <form method="POST" class="response-form">
+                                    <input type="hidden" name="ticket_id" value="<?php echo $current_ticket['ticket_id']; ?>">
+                                    <div class="form-group">
+                                        <label for="response_message">Your Response</label>
+                                        <textarea id="response_message" name="message" rows="5" required></textarea>
+                                    </div>
+                                    <button type="submit" name="submit_response" class="btn">
+                                        <i class="fas fa-paper-plane"></i> Send Response
+                                    </button>
+                                </form>
+                            <?php else: ?>
+                                <div class="message message-error">
+                                    <i class="fas fa-info-circle"></i> This ticket is closed and cannot receive new responses.
+                                </div>
+                            <?php endif; ?>
+                        </div>
+                    </div>
+                    
+                    <a href="profile.php#support" class="btn btn-outline" style="margin-top: 1.5rem;">
+                        <i class="fas fa-arrow-left"></i> Back to Tickets
+                    </a>
+                <?php else: ?>
+                    <!-- Ticket List View -->
+                    <a href="#new-ticket" class="btn" style="margin-bottom: 1.5rem;">
+                        <i class="fas fa-plus"></i> Create New Ticket
+                    </a>
+                    
+                    <?php if (empty($support_tickets)): ?>
+                        <p>You don't have any support tickets yet.</p>
+                    <?php else: ?>
+                        <div class="ticket-list">
+                            <?php foreach ($support_tickets as $ticket): ?>
+                                <div class="ticket-item">
+                                    <div class="ticket-header">
+                                        <a href="profile.php?ticket_id=<?php echo $ticket['ticket_id']; ?>#support" class="ticket-subject">
+                                            <?php echo htmlspecialchars($ticket['subject']); ?>
+                                        </a>
+                                        <span class="ticket-status status-<?php echo str_replace(' ', '_', strtolower($ticket['status'])); ?>">
+                                            <?php echo ucfirst(str_replace('_', ' ', $ticket['status'])); ?>
+                                        </span>
+                                    </div>
+                                    
+                                    <?php if ($ticket['order_id']): ?>
+                                        <div class="ticket-order">
+                                            Related to Order #<?php echo $ticket['order_id']; ?>
+                                        </div>
+                                    <?php endif; ?>
+                                    
+                                    <div class="ticket-message">
+                                        <p><?php echo nl2br(htmlspecialchars(substr($ticket['message'], 0, 200) . (strlen($ticket['message']) > 200 ? '...' : ''))); ?></p>
+                                    </div>
+                                    
+                                    <div class="ticket-footer">
+                                        <div>
+                                            Created: <?php echo date('M d, Y h:i A', strtotime($ticket['created_at'])); ?>
+                                        </div>
+                                        <div class="ticket-response-count">
+                                            <i class="fas fa-comments"></i>
+                                            <?php echo $ticket['response_count']; ?> response<?php echo $ticket['response_count'] != 1 ? 's' : ''; ?>
+                                        </div>
+                                    </div>
+                                </div>
+                            <?php endforeach; ?>
+                        </div>
+                    <?php endif; ?>
+                    
+                    <!-- New Ticket Form -->
+                    <div id="new-ticket" class="profile-section" style="margin-top: 3rem; padding: 2rem; background-color: var(--secondary-color); border-radius: var(--border-radius);">
+                        <h4><i class="fas fa-plus"></i> Create New Support Ticket</h4>
+                        <form method="POST">
+                            <div class="form-group">
+                                <label for="ticket_subject">Subject</label>
+                                <input type="text" id="ticket_subject" name="subject" required>
+                            </div>
+                            
+                            <div class="form-group">
+                                <label for="ticket_order_id">Related Order (optional)</label>
+                                <select id="ticket_order_id" name="order_id" class="form-control">
+                                    <option value="">Select an order...</option>
+                                    <?php foreach ($order_history as $order): ?>
+                                        <option value="<?php echo $order['order_id']; ?>">Order #<?php echo $order['order_id']; ?> - <?php echo date('M d, Y', strtotime($order['order_date'])); ?></option>
+                                    <?php endforeach; ?>
+                                </select>
+                            </div>
+                            
+                            <div class="form-group">
+                                <label for="ticket_message">Message</label>
+                                <textarea id="ticket_message" name="message" rows="5" required></textarea>
+                            </div>
+                            
+                            <button type="submit" name="submit_ticket" class="btn">
+                                <i class="fas fa-paper-plane"></i> Submit Ticket
+                            </button>
+                        </form>
+                    </div>
+                <?php endif; ?>
+            </div>
+            
+            <!-- Product Reviews Section -->
+            <div id="reviews" class="profile-section" style="display: none;">
+                <h3><i class="fas fa-star"></i> My Product Reviews</h3>
+                
+                <?php if ($review_product): ?>
+                    <!-- Review Form -->
+                    <div class="review-form-container">
+                        <h4>Write a Review</h4>
+                        
+                        <div class="review-product-card">
+                            <img src="assets/images/products/<?php echo htmlspecialchars($review_product['image']); ?>" alt="<?php echo htmlspecialchars($review_product['name']); ?>" class="review-product-image-large">
+                            <div>
+                                <h4><?php echo htmlspecialchars($review_product['name']); ?></h4>
+                                <p>₱<?php echo number_format($review_product['price'], 2); ?></p>
+                                <p>From Order #<?php echo $review_product['order_id']; ?></p>
+                            </div>
+                        </div>
+                        
+                        <form method="POST">
+                            <input type="hidden" name="product_id" value="<?php echo $review_product['product_id']; ?>">
+                            <input type="hidden" name="order_id" value="<?php echo $review_product['order_id']; ?>">
+                            
+                            <div class="form-group">
+                                <label>Rating</label>
+                                <div class="rating-input">
+                                    <span>Your rating:</span>
+                                    <div class="rating-stars">
+                                        <input type="radio" id="star5" name="rating" value="5" required>
+                                        <label for="star5"><i class="fas fa-star"></i></label>
+                                        <input type="radio" id="star4" name="rating" value="4">
+                                        <label for="star4"><i class="fas fa-star"></i></label>
+                                        <input type="radio" id="star3" name="rating" value="3">
+                                        <label for="star3"><i class="fas fa-star"></i></label>
+                                        <input type="radio" id="star2" name="rating" value="2">
+                                        <label for="star2"><i class="fas fa-star"></i></label>
+                                        <input type="radio" id="star1" name="rating" value="1">
+                                        <label for="star1"><i class="fas fa-star"></i></label>
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            <div class="form-group">
+                                <label for="review_title">Title</label>
+                                <input type="text" id="review_title" name="title" required>
+                            </div>
+                            
+                            <div class="form-group">
+                                <label for="review_content">Your Review</label>
+                                <textarea id="review_content" name="review" rows="5" required></textarea>
+                            </div>
+                            
+                            <button type="submit" name="submit_review" class="btn">
+                                <i class="fas fa-paper-plane"></i> Submit Review
+                            </button>
+                            
+                            <a href="profile.php#reviews" class="btn btn-outline" style="margin-left: 1rem;">
+                                <i class="fas fa-times"></i> Cancel
+                            </a>
+                        </form>
+                    </div>
+                <?php endif; ?>
+                
+                <?php if (empty($user_reviews) && !$review_product): ?>
+                    <p>You haven't reviewed any products yet.</p>
+                    <p>You can review products from your <a href="#orders">order history</a> after they've been delivered.</p>
+                <?php else: ?>
+                    <div class="review-list">
+                        <?php foreach ($user_reviews as $review): ?>
+                            <div class="review-item">
+                                <div class="review-product">
+                                    <img src="assets/images/products/<?php echo htmlspecialchars($review['product_image']); ?>" alt="<?php echo htmlspecialchars($review['product_name']); ?>" class="review-product-image">
+                                    <div>
+                                        <h4 class="review-product-name"><?php echo htmlspecialchars($review['product_name']); ?></h4>
+                                        <p>From Order #<?php echo $review['order_id']; ?></p>
+                                    </div>
+                                </div>
+                                
+                                <div class="review-rating">
+                                    <span>Rating:</span>
+                                    <div class="stars">
+                                        <?php for ($i = 1; $i <= 5; $i++): ?>
+                                            <i class="fas fa-star<?php echo $i > $review['rating'] ? '-half-alt' : ''; ?>"></i>
+                                        <?php endfor; ?>
+                                    </div>
+                                    <span><?php echo $review['rating']; ?> out of 5</span>
+                                </div>
+                                
+                                <?php if (!empty($review['title'])): ?>
+                                    <h5 class="review-title"><?php echo htmlspecialchars($review['title']); ?></h5>
+                                <?php endif; ?>
+                                
+                                <div class="review-content">
+                                    <p><?php echo nl2br(htmlspecialchars($review['review'])); ?></p>
+                                </div>
+                                
+                                <div class="review-footer">
+                                    <div>
+                                        Reviewed on <?php echo date('M d, Y', strtotime($review['created_at'])); ?>
+                                    </div>
+                                    <div>
+                                        <span class="review-status status-<?php echo $review['is_approved'] ? 'approved' : 'pending'; ?>">
+                                            <?php echo $review['is_approved'] ? 'Approved' : 'Pending Approval'; ?>
+                                        </span>
+                                    </div>
+                                </div>
+                            </div>
+                        <?php endforeach; ?>
+                    </div>
+                <?php endif; ?>
             </div>
         </div>
     </div>
@@ -2311,6 +3089,23 @@ if ($auth->isLoggedIn()) {
         
         // Also run when hash changes
         window.addEventListener('hashchange', checkUrlHash);
+        
+        // Star rating interaction
+        document.querySelectorAll('.rating-stars input').forEach(star => {
+            star.addEventListener('change', function() {
+                const stars = this.closest('.rating-stars');
+                const rating = this.value;
+                const labels = stars.querySelectorAll('label');
+                
+                labels.forEach((label, index) => {
+                    if (index < rating) {
+                        label.style.color = '#ffc107';
+                    } else {
+                        label.style.color = '#ccc';
+                    }
+                });
+            });
+        });
     </script>
 </body>
 </html>

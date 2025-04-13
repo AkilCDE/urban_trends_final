@@ -1,10 +1,8 @@
 <?php
-
 define('DB_HOST', 'localhost');
 define('DB_USER', 'root');
 define('DB_PASS', '');
 define('DB_NAME', 'urban_trends');
-
 
 try {
     $db = new PDO("mysql:host=".DB_HOST.";dbname=".DB_NAME, DB_USER, DB_PASS);
@@ -13,9 +11,7 @@ try {
     die("Connection failed: " . $e->getMessage());
 }
 
-
 session_start();
-
 
 if (!isset($_SESSION['user_id']) || !isset($_SESSION['is_admin']) || $_SESSION['is_admin'] != 1) {
     header("Location: ../login.php");
@@ -29,20 +25,25 @@ class ProductManager {
         $this->db = $db;
     }
     
-   
     public function getAllProducts($category = null, $search = null) {
         try {
-            $query = "SELECT * FROM products";
+            $query = "
+                SELECT p.*, 
+                       GROUP_CONCAT(CONCAT(pv.size, ' (', pv.stock, ')') ORDER BY 
+                       FIELD(pv.size, 'XS','S','M','L','XL','XXL') SEPARATOR ', ') as size_info
+                FROM products p
+                LEFT JOIN product_variations pv ON p.product_id = pv.product_id
+            ";
             $conditions = [];
             $params = [];
             
             if ($category) {
-                $conditions[] = "category = ?";
+                $conditions[] = "p.category = ?";
                 $params[] = $category;
             }
             
             if ($search) {
-                $conditions[] = "(name LIKE ? OR description LIKE ?)";
+                $conditions[] = "(p.name LIKE ? OR p.description LIKE ?)";
                 $params[] = "%$search%";
                 $params[] = "%$search%";
             }
@@ -51,7 +52,7 @@ class ProductManager {
                 $query .= " WHERE " . implode(" AND ", $conditions);
             }
             
-            $query .= " ORDER BY created_at DESC";
+            $query .= " GROUP BY p.product_id ORDER BY p.created_at DESC";
             
             $stmt = $this->db->prepare($query);
             $stmt->execute($params);
@@ -62,12 +63,17 @@ class ProductManager {
         }
     }
     
-    /**
-     * Get product by ID
-     */
     public function getProductById($product_id) {
         try {
-            $stmt = $this->db->prepare("SELECT * FROM products WHERE id = ?");
+            $stmt = $this->db->prepare("
+                SELECT p.*, 
+                       GROUP_CONCAT(CONCAT(pv.size, '|', pv.stock, '|', pv.price_adjustment, '|', pv.variation_id) 
+                           ORDER BY FIELD(pv.size, 'XS','S','M','L','XL','XXL') SEPARATOR ';') as variations
+                FROM products p
+                LEFT JOIN product_variations pv ON p.product_id = pv.product_id
+                WHERE p.product_id = ?
+                GROUP BY p.product_id
+            ");
             $stmt->execute([$product_id]);
             return $stmt->fetch(PDO::FETCH_ASSOC);
         } catch(PDOException $e) {
@@ -76,75 +82,130 @@ class ProductManager {
         }
     }
     
-    /**
-     * Add new product
-     */
-    public function addProduct($product_data) {
+    public function addProduct($product_data, $variations) {
         try {
-            $stmt = $this->db->prepare("INSERT INTO products 
-                                      (name, description, price, category, stock, image) 
-                                      VALUES (?, ?, ?, ?, ?, ?)");
+            $this->db->beginTransaction();
+            
+            $stmt = $this->db->prepare("
+                INSERT INTO products (name, description, price, category, image) 
+                VALUES (?, ?, ?, ?, ?)
+            ");
             $stmt->execute([
                 $product_data['name'],
                 $product_data['description'],
                 $product_data['price'],
                 $product_data['category'],
-                $product_data['stock'],
                 $product_data['image']
             ]);
-            return $this->db->lastInsertId();
+            $product_id = $this->db->lastInsertId();
+            
+            foreach ($variations as $variation) {
+                $stmt = $this->db->prepare("
+                    INSERT INTO product_variations (product_id, size, stock, price_adjustment, is_default) 
+                    VALUES (?, ?, ?, ?, ?)
+                ");
+                $stmt->execute([
+                    $product_id,
+                    $variation['size'],
+                    $variation['stock'],
+                    $variation['price_adjustment'],
+                    $variation['size'] == 'M' ? 1 : 0
+                ]);
+            }
+            
+            $this->db->commit();
+            return $product_id;
         } catch(PDOException $e) {
+            $this->db->rollBack();
             error_log("Error adding product: " . $e->getMessage());
             return false;
         }
     }
     
-    /**
-     * Update product
-     */
-    public function updateProduct($product_id, $product_data) {
+    public function updateProduct($product_id, $product_data, $variations) {
         try {
-            $stmt = $this->db->prepare("UPDATE products SET 
-                                      name = ?, 
-                                      description = ?, 
-                                      price = ?, 
-                                      category = ?, 
-                                      stock = ?, 
-                                      image = ? 
-                                      WHERE id = ?");
+            $this->db->beginTransaction();
+            
+            $stmt = $this->db->prepare("
+                UPDATE products SET 
+                    name = ?, 
+                    description = ?, 
+                    price = ?, 
+                    category = ?, 
+                    image = ? 
+                WHERE product_id = ?
+            ");
             $stmt->execute([
                 $product_data['name'],
                 $product_data['description'],
                 $product_data['price'],
                 $product_data['category'],
-                $product_data['stock'],
                 $product_data['image'],
                 $product_id
             ]);
+            
+            // Update existing variations and add new ones
+            if (isset($variations['existing'])) {
+                foreach ($variations['existing'] as $variation) {
+                    $stmt = $this->db->prepare("
+                        UPDATE product_variations SET 
+                            stock = ?, 
+                            price_adjustment = ? 
+                        WHERE variation_id = ? AND product_id = ?
+                    ");
+                    $stmt->execute([
+                        $variation['stock'],
+                        $variation['price_adjustment'],
+                        $variation['variation_id'],
+                        $product_id
+                    ]);
+                }
+            }
+            
+            if (isset($variations['new'])) {
+                foreach ($variations['new'] as $variation) {
+                    $stmt = $this->db->prepare("
+                        INSERT INTO product_variations (product_id, size, stock, price_adjustment, is_default) 
+                        VALUES (?, ?, ?, ?, ?)
+                    ");
+                    $stmt->execute([
+                        $product_id,
+                        $variation['size'],
+                        $variation['stock'],
+                        $variation['price_adjustment'],
+                        $variation['size'] == 'M' ? 1 : 0
+                    ]);
+                }
+            }
+            
+            $this->db->commit();
             return true;
         } catch(PDOException $e) {
+            $this->db->rollBack();
             error_log("Error updating product: " . $e->getMessage());
             return false;
         }
     }
     
-    /**
-     * Delete product
-     */
     public function deleteProduct($product_id) {
         try {
-            $stmt = $this->db->prepare("DELETE FROM products WHERE id = ?");
+            $this->db->beginTransaction();
+            
+            $stmt = $this->db->prepare("DELETE FROM product_variations WHERE product_id = ?");
             $stmt->execute([$product_id]);
+            
+            $stmt = $this->db->prepare("DELETE FROM products WHERE product_id = ?");
+            $stmt->execute([$product_id]);
+            
+            $this->db->commit();
             return true;
         } catch(PDOException $e) {
+            $this->db->rollBack();
             error_log("Error deleting product: " . $e->getMessage());
             return false;
         }
     }
     
-    /**
-     * Get all categories
-     */
     public function getCategories() {
         try {
             $stmt = $this->db->query("SELECT DISTINCT category FROM products ORDER BY category");
@@ -155,22 +216,37 @@ class ProductManager {
         }
     }
     
-    /**
-     * Update product stock
-     */
-    public function updateStock($product_id, $stock_change) {
+    public function updateStock($variation_id, $stock_change) {
         try {
-            $stmt = $this->db->prepare("UPDATE products SET stock = stock + ? WHERE id = ?");
-            $stmt->execute([$stock_change, $product_id]);
+            $stmt = $this->db->prepare("
+                UPDATE product_variations SET stock = stock + ? 
+                WHERE variation_id = ?
+            ");
+            $stmt->execute([$stock_change, $variation_id]);
             return true;
         } catch(PDOException $e) {
             error_log("Error updating stock: " . $e->getMessage());
             return false;
         }
     }
+    
+    public function getVariations($product_id) {
+        try {
+            $stmt = $this->db->prepare("
+                SELECT variation_id, size, stock, price_adjustment 
+                FROM product_variations 
+                WHERE product_id = ?
+                ORDER BY FIELD(size, 'XS','S','M','L','XL','XXL')
+            ");
+            $stmt->execute([$product_id]);
+            return $stmt->fetchAll(PDO::FETCH_ASSOC);
+        } catch(PDOException $e) {
+            error_log("Error getting variations: " . $e->getMessage());
+            return [];
+        }
+    }
 }
 
-// Initialize ProductManager
 $productManager = new ProductManager($db);
 
 // Handle form submissions
@@ -178,13 +254,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     // Add new product
     if (isset($_POST['add_product'])) {
         $product_data = [
-            'name' => $_POST['name'],
-            'description' => $_POST['description'],
-            'price' => $_POST['price'],
-            'category' => $_POST['category'],
-            'stock' => $_POST['stock'],
+            'name' => htmlspecialchars($_POST['name']),
+            'description' => htmlspecialchars($_POST['description']),
+            'price' => floatval($_POST['price']),
+            'category' => htmlspecialchars($_POST['category']),
             'image' => 'default.jpg'
         ];
+        
+        $variations = [];
+        if (isset($_POST['size']) && is_array($_POST['size'])) {
+            for ($i = 0; $i < count($_POST['size']); $i++) {
+                $variations[] = [
+                    'size' => $_POST['size'][$i],
+                    'stock' => intval($_POST['stock'][$i]),
+                    'price_adjustment' => floatval($_POST['price_adjustment'][$i] ?? 0)
+                ];
+            }
+        }
         
         // Handle image upload
         if (isset($_FILES['image']) && $_FILES['image']['error'] === UPLOAD_ERR_OK) {
@@ -192,7 +278,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $image = basename($_FILES['image']['name']);
             $uploadFile = $uploadDir . $image;
             
-            // Check if image file is valid
             $imageFileType = strtolower(pathinfo($uploadFile, PATHINFO_EXTENSION));
             $allowedExtensions = ['jpg', 'jpeg', 'png', 'gif'];
             
@@ -203,7 +288,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
         }
         
-        if ($productManager->addProduct($product_data)) {
+        if ($productManager->addProduct($product_data, $variations)) {
             $_SESSION['success_message'] = "Product added successfully!";
             header("Location: products.php");
             exit;
@@ -214,29 +299,46 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     
     // Update product
     if (isset($_POST['update_product'])) {
-        $product_id = $_POST['product_id'];
+        $product_id = intval($_POST['product_id']);
         $product_data = [
-            'name' => $_POST['name'],
-            'description' => $_POST['description'],
-            'price' => $_POST['price'],
-            'category' => $_POST['category'],
-            'stock' => $_POST['stock'],
+            'name' => htmlspecialchars($_POST['name']),
+            'description' => htmlspecialchars($_POST['description']),
+            'price' => floatval($_POST['price']),
+            'category' => htmlspecialchars($_POST['category']),
             'image' => $_POST['current_image']
         ];
         
-        // Handle image upload
+        $variations = ['existing' => [], 'new' => []];
+        if (isset($_POST['variation_id']) && is_array($_POST['variation_id'])) {
+            for ($i = 0; $i < count($_POST['variation_id']); $i++) {
+                $variations['existing'][] = [
+                    'variation_id' => intval($_POST['variation_id'][$i]),
+                    'stock' => intval($_POST['existing_stock'][$i]),
+                    'price_adjustment' => floatval($_POST['existing_price_adjustment'][$i] ?? 0)
+                ];
+            }
+        }
+        
+        if (isset($_POST['new_size']) && is_array($_POST['new_size'])) {
+            for ($i = 0; $i < count($_POST['new_size']); $i++) {
+                $variations['new'][] = [
+                    'size' => $_POST['new_size'][$i],
+                    'stock' => intval($_POST['new_stock'][$i]),
+                    'price_adjustment' => floatval($_POST['new_price_adjustment'][$i] ?? 0)
+                ];
+            }
+        }
+        
         if (isset($_FILES['image']) && $_FILES['image']['error'] === UPLOAD_ERR_OK) {
             $uploadDir = '../assets/images/products/';
             $image = basename($_FILES['image']['name']);
             $uploadFile = $uploadDir . $image;
             
-            // Check if image file is valid
             $imageFileType = strtolower(pathinfo($uploadFile, PATHINFO_EXTENSION));
             $allowedExtensions = ['jpg', 'jpeg', 'png', 'gif'];
             
             if (in_array($imageFileType, $allowedExtensions)) {
                 if (move_uploaded_file($_FILES['image']['tmp_name'], $uploadFile)) {
-                    // Delete old image if it's not the default
                     if ($_POST['current_image'] != 'default.jpg') {
                         @unlink($uploadDir . $_POST['current_image']);
                     }
@@ -245,7 +347,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
         }
         
-        if ($productManager->updateProduct($product_id, $product_data)) {
+        if ($productManager->updateProduct($product_id, $product_data, $variations)) {
             $_SESSION['success_message'] = "Product updated successfully!";
             header("Location: products.php");
             exit;
@@ -256,10 +358,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     
     // Update stock
     if (isset($_POST['update_stock'])) {
-        $product_id = $_POST['product_id'];
-        $stock_change = $_POST['stock_change'];
+        $variation_id = intval($_POST['variation_id']);
+        $stock_change = intval($_POST['stock_change']);
         
-        if ($productManager->updateStock($product_id, $stock_change)) {
+        if ($productManager->updateStock($variation_id, $stock_change)) {
             $_SESSION['success_message'] = "Stock updated successfully!";
         } else {
             $_SESSION['error_message'] = "Failed to update stock.";
@@ -271,13 +373,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
 // Handle product deletion
 if (isset($_GET['delete_product'])) {
-    $product_id = $_GET['delete_product'];
-    
-    // First get the image to delete it
+    $product_id = intval($_GET['delete_product']);
     $product = $productManager->getProductById($product_id);
     
     if ($product && $productManager->deleteProduct($product_id)) {
-        // Delete the image if it's not the default
         if ($product['image'] != 'default.jpg') {
             @unlink('../assets/images/products/' . $product['image']);
         }
@@ -299,7 +398,7 @@ $products = $productManager->getAllProducts($category_filter, $search_filter);
 // Get all categories
 $categories = $productManager->getCategories();
 
-// Get product details if viewing single product
+// Get product details if editing
 $product = null;
 if (isset($_GET['edit'])) {
     $product = $productManager->getProductById($_GET['edit']);
@@ -352,7 +451,6 @@ if (isset($_GET['logout'])) {
             min-height: 100vh;
         }
         
-        /* Sidebar Styles */
         .admin-sidebar {
             width: var(--sidebar-width);
             background-color: var(--dark-color);
@@ -409,7 +507,6 @@ if (isset($_GET['logout'])) {
             text-align: center;
         }
         
-        /* Main Content Styles */
         .admin-main {
             flex: 1;
             margin-left: var(--sidebar-width);
@@ -455,7 +552,6 @@ if (isset($_GET['logout'])) {
             margin-right: 5px;
         }
         
-        /* Tables */
         .table-container {
             background-color: white;
             border-radius: 8px;
@@ -509,7 +605,6 @@ if (isset($_GET['logout'])) {
             color: #155724;
         }
         
-        /* Buttons */
         .btn {
             padding: 6px 12px;
             border-radius: 4px;
@@ -557,7 +652,15 @@ if (isset($_GET['logout'])) {
             font-size: 0.75rem;
         }
         
-        /* Forms */
+        .btn-secondary {
+            background-color: #6c757d;
+            color: white;
+        }
+        
+        .btn-secondary:hover {
+            background-color: #5a6268;
+        }
+        
         .form-group {
             margin-bottom: 15px;
         }
@@ -582,7 +685,6 @@ if (isset($_GET['logout'])) {
             box-shadow: 0 0 0 3px rgba(67, 97, 238, 0.2);
         }
         
-        /* Product Details */
         .product-details {
             background-color: white;
             border-radius: 8px;
@@ -604,30 +706,6 @@ if (isset($_GET['logout'])) {
             color: var(--dark-color);
         }
         
-        .product-meta {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 20px;
-            margin-bottom: 20px;
-        }
-        
-        .product-meta-item {
-            background-color: #f8f9fa;
-            padding: 15px;
-            border-radius: 6px;
-        }
-        
-        .product-meta-item h4 {
-            color: #666;
-            font-size: 0.9rem;
-            margin-bottom: 5px;
-        }
-        
-        .product-meta-item p {
-            font-weight: 500;
-            color: var(--dark-color);
-        }
-        
         .product-image-container {
             margin-top: 20px;
             text-align: center;
@@ -640,7 +718,6 @@ if (isset($_GET['logout'])) {
             border-radius: 4px;
         }
         
-        /* Filters */
         .filters {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
@@ -652,7 +729,6 @@ if (isset($_GET['logout'])) {
             box-shadow: 0 2px 10px rgba(0,0,0,0.05);
         }
         
-        /* Stock Update Modal */
         .modal-overlay {
             position: fixed;
             top: 0;
@@ -717,7 +793,49 @@ if (isset($_GET['logout'])) {
             gap: 10px;
         }
         
-        /* Responsive Styles */
+        .size-variations-container {
+            margin-bottom: 10px;
+        }
+        
+        .size-variation {
+            margin-bottom: 10px;
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+        
+        .size-variation select,
+        .size-variation input {
+            flex: 1;
+        }
+        
+        .size-variation .remove-size {
+            width: 40px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        
+        .existing-variations-container .size-variation input:disabled {
+            background-color: #f8f9fa;
+        }
+        
+        .alert {
+            padding: 10px;
+            border-radius: 4px;
+            margin-bottom: 15px;
+        }
+        
+        .alert-success {
+            background-color: #d4edda;
+            color: #155724;
+        }
+        
+        .alert-danger {
+            background-color: #f8d7da;
+            color: #721c24;
+        }
+        
         @media (max-width: 768px) {
             .admin-sidebar {
                 width: 70px;
@@ -743,8 +861,13 @@ if (isset($_GET['logout'])) {
                 margin-left: 70px;
             }
             
-            .product-meta {
-                grid-template-columns: 1fr;
+            .size-variation {
+                flex-direction: column;
+                align-items: stretch;
+            }
+            
+            .size-variation .remove-size {
+                width: 100%;
             }
         }
         
@@ -791,17 +914,20 @@ if (isset($_GET['logout'])) {
                 align-items: flex-start;
                 gap: 10px;
             }
+            
+            .filters {
+                grid-template-columns: 1fr;
+            }
         }
     </style>
 </head>
 <body>
-    <!-- Sidebar -->
     <div class="admin-sidebar">
         <div class="admin-sidebar-header">
             <h2><i class="fas fa-crown"></i> <span>Admin Panel</span></h2>
         </div>
         <ul>
-        <li><a href="dashboard.php"><i class="fas fa-tachometer-alt"></i> <span>Dashboard</span></a></li>
+            <li><a href="dashboard.php"><i class="fas fa-tachometer-alt"></i> <span>Dashboard</span></a></li>
             <li><a href="products.php" class="active"><i class="fas fa-tshirt"></i> <span>Products</span></a></li>
             <li><a href="orders.php"><i class="fas fa-shopping-bag"></i> <span>Orders</span></a></li>
             <li><a href="customers.php"><i class="fas fa-users"></i> <span>Customers</span></a></li>
@@ -809,7 +935,6 @@ if (isset($_GET['logout'])) {
         </ul>
     </div>
 
-    <!-- Main Content -->
     <div class="admin-main">
         <div class="admin-header">
             <h2><i class="fas fa-tshirt"></i> <?php echo isset($product) ? "Edit Product" : "Product Management"; ?></h2>
@@ -817,25 +942,26 @@ if (isset($_GET['logout'])) {
                 <a href="../index.php"><i class="fas fa-home"></i> View Site</a>
                 <a href="?logout=1"><i class="fas fa-sign-out-alt"></i> Logout</a>
                 <?php if (!isset($product)): ?>
-                    
+                    <a href="products.php?add_new=1" class="btn btn-success">
+                        <i class="fas fa-plus"></i> Add New
+                    </a>
                 <?php endif; ?>
             </div>
         </div>
 
         <?php if (isset($_SESSION['success_message'])): ?>
-            <div class="alert alert-success" style="background-color: #d4edda; color: #155724; padding: 10px; border-radius: 4px; margin-bottom: 15px;">
+            <div class="alert alert-success">
                 <?php echo $_SESSION['success_message']; unset($_SESSION['success_message']); ?>
             </div>
         <?php endif; ?>
         
         <?php if (isset($_SESSION['error_message'])): ?>
-            <div class="alert alert-danger" style="background-color: #f8d7da; color: #721c24; padding: 10px; border-radius: 4px; margin-bottom: 15px;">
+            <div class="alert alert-danger">
                 <?php echo $_SESSION['error_message']; unset($_SESSION['error_message']); ?>
             </div>
         <?php endif; ?>
 
         <?php if (isset($_GET['add_new']) || isset($product)): ?>
-            <!-- Product Form -->
             <div class="product-details">
                 <div class="product-header">
                     <h3><?php echo isset($product) ? "Edit Product" : "Add New Product"; ?></h3>
@@ -843,7 +969,7 @@ if (isset($_GET['logout'])) {
                 
                 <form method="POST" enctype="multipart/form-data">
                     <?php if (isset($product)): ?>
-                        <input type="hidden" name="product_id" value="<?php echo $product['id']; ?>">
+                        <input type="hidden" name="product_id" value="<?php echo $product['product_id']; ?>">
                         <input type="hidden" name="current_image" value="<?php echo $product['image']; ?>">
                     <?php endif; ?>
                     
@@ -861,7 +987,7 @@ if (isset($_GET['logout'])) {
                     </div>
                     
                     <div class="form-group">
-                        <label for="price">Price</label>
+                        <label for="price">Base Price (₱)</label>
                         <input type="number" id="price" name="price" step="0.01" min="0" class="form-control" required 
                                value="<?php echo isset($product) ? $product['price'] : ''; ?>">
                     </div>
@@ -882,10 +1008,56 @@ if (isset($_GET['logout'])) {
                         </select>
                     </div>
                     
+                    <?php if (isset($product)): ?>
+                        <div class="form-group">
+                            <label>Existing Size Variations</label>
+                            <div class="existing-variations-container">
+                                <?php
+                                if ($product && $product['variations']) {
+                                    $variations = explode(';', $product['variations']);
+                                    foreach ($variations as $variation) {
+                                        list($size, $stock, $price_adjustment, $variation_id) = explode('|', $variation);
+                                ?>
+                                    <div class="size-variation">
+                                        <input type="hidden" name="variation_id[]" value="<?php echo $variation_id; ?>">
+                                        <input type="text" value="<?php echo $size; ?>" class="form-control" disabled>
+                                        <input type="number" name="existing_price_adjustment[]" step="0.01" 
+                                               value="<?php echo $price_adjustment; ?>" placeholder="Price Adjustment" class="form-control">
+                                        <input type="number" name="existing_stock[]" min="0" 
+                                               value="<?php echo $stock; ?>" placeholder="Stock" class="form-control" required>
+                                    </div>
+                                <?php
+                                    }
+                                } else {
+                                    echo '<p>No sizes available. Add new sizes below.</p>';
+                                }
+                                ?>
+                            </div>
+                        </div>
+                    <?php endif; ?>
+                    
                     <div class="form-group">
-                        <label for="stock">Stock Quantity</label>
-                        <input type="number" id="stock" name="stock" min="0" class="form-control" required 
-                               value="<?php echo isset($product) ? $product['stock'] : ''; ?>">
+                        <label><?php echo isset($product) ? 'Add New Size Variations' : 'Size Variations'; ?></label>
+                        <div class="size-variations-container">
+                            <div class="size-variation">
+                                <select name="<?php echo isset($product) ? 'new_size[]' : 'size[]'; ?>" class="form-control">
+                                    <option value="XS">XS</option>
+                                    <option value="S">S</option>
+                                    <option value="M" selected>M</option>
+                                    <option value="L">L</option>
+                                    <option value="XL">XL</option>
+                                    <option value="XXL">XXL</option>
+                                </select>
+                                <input type="number" name="<?php echo isset($product) ? 'new_price_adjustment[]' : 'price_adjustment[]'; ?>" 
+                                       step="0.01" placeholder="Price Adjustment" class="form-control">
+                                <input type="number" name="<?php echo isset($product) ? 'new_stock[]' : 'stock[]'; ?>" 
+                                       min="0" placeholder="Stock" class="form-control" required>
+                                <button type="button" class="btn btn-danger remove-size"><i class="fas fa-times"></i></button>
+                            </div>
+                        </div>
+                        <button type="button" class="btn btn-primary add-size-variation" style="margin-top: 10px;">
+                            <i class="fas fa-plus"></i> Add Another Size
+                        </button>
                     </div>
                     
                     <div class="form-group">
@@ -910,7 +1082,6 @@ if (isset($_GET['logout'])) {
                 </form>
             </div>
         <?php else: ?>
-            <!-- Product List View -->
             <div class="filters">
                 <div class="form-group">
                     <label for="category">Category</label>
@@ -947,7 +1118,7 @@ if (isset($_GET['logout'])) {
                             <th>Name</th>
                             <th>Category</th>
                             <th>Price</th>
-                            <th>Stock</th>
+                            <th>Sizes</th>
                             <th>Actions</th>
                         </tr>
                     </thead>
@@ -959,23 +1130,31 @@ if (isset($_GET['logout'])) {
                                 </td>
                                 <td><?php echo htmlspecialchars($product['name']); ?></td>
                                 <td><?php echo ucfirst(str_replace('_', ' ', $product['category'])); ?></td>
-                                <td>$<?php echo number_format($product['price'], 2); ?></td>
+                                <td>₱<?php echo number_format($product['price'], 2); ?></td>
                                 <td>
-                                    <span class="status <?php 
-                                        echo $product['stock'] < 5 ? 'low-stock' : 
-                                             ($product['stock'] < 10 ? 'warning' : 'success'); 
-                                    ?>">
-                                        <?php echo $product['stock']; ?>
+                                    <?php
+                                    $sizes = explode(', ', $product['size_info'] ?? '');
+                                    $hasLowStock = false;
+                                    foreach ($sizes as $size) {
+                                        preg_match('/(\w+)\s*\((\d+)\)/', $size, $matches);
+                                        if ($matches && intval($matches[2]) < 5) {
+                                            $hasLowStock = true;
+                                            break;
+                                        }
+                                    }
+                                    ?>
+                                    <span class="status <?php echo $hasLowStock ? 'low-stock' : 'success'; ?>">
+                                        <?php echo $product['size_info'] ?? 'No sizes'; ?>
                                     </span>
                                 </td>
                                 <td>
-                                    <a href="products.php?edit=<?php echo $product['id']; ?>" class="btn btn-primary btn-sm">
+                                    <a href="products.php?edit=<?php echo $product['product_id']; ?>" class="btn btn-primary btn-sm">
                                         <i class="fas fa-edit"></i> Edit
                                     </a>
-                                    <a href="products.php?delete_product=<?php echo $product['id']; ?>" class="btn btn-danger btn-sm" onclick="return confirm('Are you sure you want to delete this product?');">
+                                    <a href="products.php?delete_product=<?php echo $product['product_id']; ?>" class="btn btn-danger btn-sm" onclick="return confirm('Are you sure you want to delete this product?');">
                                         <i class="fas fa-trash"></i> Delete
                                     </a>
-                                    <button class="btn btn-success btn-sm" onclick="openStockModal(<?php echo $product['id']; ?>, '<?php echo htmlspecialchars($product['name'], ENT_QUOTES); ?>')">
+                                    <button class="btn btn-success btn-sm" onclick="openStockModal(<?php echo $product['product_id']; ?>, '<?php echo htmlspecialchars($product['name'], ENT_QUOTES); ?>')">
                                         <i class="fas fa-boxes"></i> Stock
                                     </button>
                                 </td>
@@ -987,7 +1166,6 @@ if (isset($_GET['logout'])) {
         <?php endif; ?>
     </div>
 
-    <!-- Stock Update Modal -->
     <div id="stockModal" class="modal-overlay">
         <div class="modal-dialog">
             <div class="modal-header">
@@ -996,6 +1174,12 @@ if (isset($_GET['logout'])) {
             <div class="modal-body">
                 <form id="stockForm" method="POST">
                     <input type="hidden" name="product_id" id="modal_product_id">
+                    <div class="form-group">
+                        <label for="variation_id">Size</label>
+                        <select id="variation_id" name="variation_id" class="form-control" required>
+                            <!-- Options will be populated by JavaScript -->
+                        </select>
+                    </div>
                     <div class="form-group">
                         <label for="stock_change">Stock Adjustment</label>
                         <div style="display: flex; align-items: center;">
@@ -1019,7 +1203,6 @@ if (isset($_GET['logout'])) {
     </div>
 
     <script>
-        // Apply filters
         function applyFilters() {
             const category = document.getElementById('category').value;
             const search = document.getElementById('search').value;
@@ -1029,24 +1212,44 @@ if (isset($_GET['logout'])) {
             if (category) url += `category=${category}&`;
             if (search) url += `search=${encodeURIComponent(search)}&`;
             
-            window.location.href = url.slice(0, -1); // Remove last & or ?
+            window.location.href = url.slice(0, -1);
         }
         
-        // Reset filters
         function resetFilters() {
             window.location.href = 'products.php';
         }
         
-        // Stock modal functions
-        function openStockModal(productId, productName) {
-            document.getElementById('modal_product_id').value = productId;
-            document.getElementById('stock_change').value = 0;
-            
-            const modalTitle = document.querySelector('#stockModal .modal-header h3');
-            modalTitle.innerHTML = `<i class="fas fa-boxes"></i> Update Stock: ${productName}`;
-            
-            document.getElementById('stockModal').classList.add('active');
-            document.body.style.overflow = 'hidden';
+        async function openStockModal(productId, productName) {
+            try {
+                const response = await fetch(`get_product_variations.php?product_id=${productId}`);
+                const variations = await response.json();
+                
+                const variationSelect = document.getElementById('variation_id');
+                variationSelect.innerHTML = '';
+                
+                if (variations.length === 0) {
+                    variationSelect.innerHTML = '<option value="">No sizes available</option>';
+                } else {
+                    variations.forEach(variation => {
+                        const option = document.createElement('option');
+                        option.value = variation.variation_id;
+                        option.textContent = `${variation.size} (Current stock: ${variation.stock})`;
+                        variationSelect.appendChild(option);
+                    });
+                }
+                
+                document.getElementById('modal_product_id').value = productId;
+                document.getElementById('stock_change').value = 0;
+                
+                const modalTitle = document.querySelector('#stockModal .modal-header h3');
+                modalTitle.innerHTML = `<i class="fas fa-boxes"></i> Update Stock: ${productName}`;
+                
+                document.getElementById('stockModal').classList.add('active');
+                document.body.style.overflow = 'hidden';
+            } catch (error) {
+                console.error('Error fetching variations:', error);
+                alert('Error loading size variations');
+            }
         }
         
         function closeStockModal() {
@@ -1063,21 +1266,63 @@ if (isset($_GET['logout'])) {
         }
         
         function submitStockForm() {
+            const variationId = document.getElementById('variation_id').value;
+            if (!variationId) {
+                alert('Please select a size to update stock.');
+                return;
+            }
             document.getElementById('stockForm').submit();
         }
         
-        // Close modal when clicking outside
         document.getElementById('stockModal').addEventListener('click', function(e) {
             if (e.target === this) {
                 closeStockModal();
             }
         });
         
-        // Close modal with Escape key
         document.addEventListener('keydown', function(e) {
             if (e.key === 'Escape') {
                 closeStockModal();
             }
+        });
+        
+        document.addEventListener('DOMContentLoaded', function() {
+            document.querySelectorAll('.add-size-variation').forEach(button => {
+                button.addEventListener('click', function() {
+                    const container = this.previousElementSibling;
+                    const isEditMode = container.querySelector('select[name="new_size[]"]') !== null;
+                    const namePrefix = isEditMode ? 'new_' : '';
+                    
+                    const newRow = document.createElement('div');
+                    newRow.className = 'size-variation';
+                    newRow.innerHTML = `
+                        <select name="${namePrefix}size[]" class="form-control">
+                            <option value="XS">XS</option>
+                            <option value="S">S</option>
+                            <option value="M" selected>M</option>
+                            <option value="L">L</option>
+                            <option value="XL">XL</option>
+                            <option value="XXL">XXL</option>
+                        </select>
+                        <input type="number" name="${namePrefix}price_adjustment[]" step="0.01" placeholder="Price Adjustment" class="form-control">
+                        <input type="number" name="${namePrefix}stock[]" min="0" placeholder="Stock" class="form-control" required>
+                        <button type="button" class="btn btn-danger remove-size"><i class="fas fa-times"></i></button>
+                    `;
+                    container.appendChild(newRow);
+                });
+            });
+            
+            document.addEventListener('click', function(e) {
+                if (e.target.classList.contains('remove-size') || e.target.parentElement.classList.contains('remove-size')) {
+                    const btn = e.target.classList.contains('remove-size') ? e.target : e.target.parentElement;
+                    const container = btn.closest('.size-variations-container');
+                    if (container.querySelectorAll('.size-variation').length > 1) {
+                        btn.closest('.size-variation').remove();
+                    } else {
+                        alert('At least one size variation is required.');
+                    }
+                }
+            });
         });
     </script>
 </body>

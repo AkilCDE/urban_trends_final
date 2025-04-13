@@ -5,7 +5,6 @@ define('DB_USER', 'root');
 define('DB_PASS', '');
 define('DB_NAME', 'urban_trends');
 
-
 try {
     $db = new PDO("mysql:host=".DB_HOST.";dbname=".DB_NAME, DB_USER, DB_PASS);
     $db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
@@ -19,7 +18,6 @@ if (!isset($_SESSION['user_id']) || !isset($_SESSION['is_admin']) || $_SESSION['
     exit;
 }
 
-
 class CustomerManager {
     private $db;
     
@@ -29,9 +27,9 @@ class CustomerManager {
     
     public function getAllCustomers($status = null, $search = null) {
         try {
-            $query = "SELECT u.*, COUNT(o.id) as order_count 
+            $query = "SELECT u.*, COUNT(o.order_id) as order_count 
                      FROM users u
-                     LEFT JOIN orders o ON u.id = o.user_id
+                     LEFT JOIN orders o ON u.user_id = o.user_id
                      WHERE u.is_admin = 0";
             
             $conditions = [];
@@ -53,7 +51,7 @@ class CustomerManager {
                 $query .= " AND " . implode(" AND ", $conditions);
             }
             
-            $query .= " GROUP BY u.id ORDER BY u.created_at DESC";
+            $query .= " GROUP BY u.user_id ORDER BY u.created_at DESC";
             
             $stmt = $this->db->prepare($query);
             $stmt->execute($params);
@@ -67,10 +65,10 @@ class CustomerManager {
     public function getCustomerById($customer_id) {
         try {
             $stmt = $this->db->prepare("SELECT u.*, 
-                                       (SELECT COUNT(*) FROM orders WHERE user_id = u.id) as order_count,
-                                       (SELECT SUM(total_amount) FROM orders WHERE user_id = u.id AND status = 'delivered') as total_spent
+                                       (SELECT COUNT(*) FROM orders WHERE user_id = u.user_id) as order_count,
+                                       (SELECT SUM(total_amount) FROM orders WHERE user_id = u.user_id AND status = 'delivered') as total_spent
                                        FROM users u 
-                                       WHERE u.id = ? AND u.is_admin = 0");
+                                       WHERE u.user_id = ? AND u.is_admin = 0");
             $stmt->execute([$customer_id]);
             return $stmt->fetch(PDO::FETCH_ASSOC);
         } catch(PDOException $e) {
@@ -81,7 +79,7 @@ class CustomerManager {
     
     public function updateCustomerStatus($customer_id, $status) {
         try {
-            $stmt = $this->db->prepare("UPDATE users SET status = ? WHERE id = ? AND is_admin = 0");
+            $stmt = $this->db->prepare("UPDATE users SET status = ? WHERE user_id = ? AND is_admin = 0");
             $stmt->execute([$status, $customer_id]);
             return true;
         } catch(PDOException $e) {
@@ -101,7 +99,7 @@ class CustomerManager {
                 return false;
             }
             
-            $stmt = $this->db->prepare("DELETE FROM users WHERE id = ? AND is_admin = 0");
+            $stmt = $this->db->prepare("DELETE FROM users WHERE user_id = ? AND is_admin = 0");
             $stmt->execute([$customer_id]);
             return true;
         } catch(PDOException $e) {
@@ -583,14 +581,13 @@ if (isset($_GET['logout'])) {
             <h2><i class="fas fa-crown"></i> <span>Admin Panel</span></h2>
         </div>
         <ul>
-        <li><a href="dashboard.php"><i class="fas fa-tachometer-alt"></i> <span>Dashboard</span></a></li>
+            <li><a href="dashboard.php"><i class="fas fa-tachometer-alt"></i> <span>Dashboard</span></a></li>
             <li><a href="products.php"><i class="fas fa-tshirt"></i> <span>Products</span></a></li>
             <li><a href="orders.php"><i class="fas fa-shopping-bag"></i> <span>Orders</span></a></li>
             <li><a href="customers.php" class="active"><i class="fas fa-users"></i> <span>Customers</span></a></li>
             <li><a href="reports.php"><i class="fas fa-chart-bar"></i> <span>Reports</span></a></li>
         </ul>
     </div>
-
 
     <div class="admin-main">
         <div class="admin-header">
@@ -650,7 +647,7 @@ if (isset($_GET['logout'])) {
                 <div class="status-update" style="margin-top: 30px;">
                     <h4>Update Customer Status</h4>
                     <form method="POST" style="display: flex; gap: 10px; align-items: center;">
-                        <input type="hidden" name="customer_id" value="<?php echo $customer['id']; ?>">
+                        <input type="hidden" name="customer_id" value="<?php echo $customer['user_id']; ?>">
                         <select name="status" class="form-control" style="flex: 1; max-width: 200px;">
                             <?php foreach ($statuses as $status): ?>
                                 <option value="<?php echo $status; ?>" <?php echo ($customer['status'] ?? 'active') == $status ? 'selected' : ''; ?>>
@@ -668,7 +665,7 @@ if (isset($_GET['logout'])) {
                     <a href="customers.php" class="btn btn-primary">
                         <i class="fas fa-arrow-left"></i> Back to Customers
                     </a>
-                    <a href="customers.php?delete_customer=<?php echo $customer['id']; ?>" class="btn btn-danger" onclick="return confirm('Are you sure you want to delete this customer? This cannot be undone.');">
+                    <a href="customers.php?delete_customer=<?php echo $customer['user_id']; ?>" class="btn btn-danger" onclick="return confirm('Are you sure you want to delete this customer? This cannot be undone.');">
                         <i class="fas fa-trash"></i> Delete Customer
                     </a>
                 </div>
@@ -728,10 +725,10 @@ if (isset($_GET['logout'])) {
                                     </span>
                                 </td>
                                 <td>
-                                    <a href="customers.php?id=<?php echo $customer['id']; ?>" class="btn btn-primary btn-sm">
+                                    <a href="customers.php?id=<?php echo $customer['user_id']; ?>" class="btn btn-primary btn-sm">
                                         <i class="fas fa-eye"></i> View
                                     </a>
-                                    <a href="customers.php?delete_customer=<?php echo $customer['id']; ?>" class="btn btn-danger btn-sm" onclick="return confirm('Are you sure you want to delete this customer?');">
+                                    <a href="customers.php?delete_customer=<?php echo $customer['user_id']; ?>" class="btn btn-danger btn-sm" onclick="return confirm('Are you sure you want to delete this customer?');">
                                         <i class="fas fa-trash"></i> Delete
                                     </a>
                                 </td>

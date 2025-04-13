@@ -22,7 +22,7 @@ if (isset($_GET['token'])) {
     
     try {
         // Check if token is valid and not expired
-        $stmt = $db->prepare("SELECT id FROM users WHERE reset_token = ? AND reset_expires > NOW()");
+        $stmt = $db->prepare("SELECT user_id FROM users WHERE reset_token = ? AND reset_expires > NOW()");
         $stmt->execute([$token]);
         $user = $stmt->fetch();
         
@@ -42,8 +42,8 @@ if (isset($_GET['token'])) {
                 } else {
                     // Update password and clear reset token
                     $hashed_password = password_hash($password, PASSWORD_DEFAULT);
-                    $stmt = $db->prepare("UPDATE users SET password = ?, reset_token = NULL, reset_expires = NULL WHERE id = ?");
-                    $stmt->execute([$hashed_password, $user['id']]);
+                    $stmt = $db->prepare("UPDATE users SET password = ?, reset_token = NULL, reset_expires = NULL WHERE user_id = ?");
+                    $stmt->execute([$hashed_password, $user['user_id']]);
                     
                     $success = 'Your password has been reset successfully. You can now <a href="login.php">login</a> with your new password.';
                     $valid_token = false; // Token has been used
@@ -175,7 +175,7 @@ if (isset($_GET['token'])) {
         
         <?php if ($valid_token): ?>
             <p>Please enter your new password</p>
-            <form method="POST">
+            <form method="POST" id="resetForm">
                 <div class="input-group">
                     <label for="password">New Password:</label>
                     <input type="password" id="password" name="password" required minlength="8">
@@ -194,5 +194,26 @@ if (isset($_GET['token'])) {
             </div>
         <?php endif; ?>
     </div>
+
+    <script>
+        document.getElementById('resetForm')?.addEventListener('submit', function(e) {
+            const password = document.getElementById('password').value;
+            const confirmPassword = document.getElementById('confirm_password').value;
+            
+            if (password !== confirmPassword) {
+                e.preventDefault();
+                alert('Passwords do not match!');
+                return false;
+            }
+            
+            if (password.length < 8) {
+                e.preventDefault();
+                alert('Password must be at least 8 characters long!');
+                return false;
+            }
+            
+            return true;
+        });
+    </script>
 </body>
 </html>

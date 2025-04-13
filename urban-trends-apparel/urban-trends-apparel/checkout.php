@@ -38,7 +38,7 @@ class Auth {
     
     public function getCurrentUser() {
         if ($this->isLoggedIn()) {
-            $stmt = $this->db->prepare("SELECT * FROM users WHERE id = ?");
+            $stmt = $this->db->prepare("SELECT * FROM users WHERE user_id = ?");
             $stmt->execute([$_SESSION['user_id']]);
             return $stmt->fetch(PDO::FETCH_ASSOC);
         }
@@ -85,12 +85,13 @@ if (isset($_GET['logout'])) {
     exit;
 }
 
-// Get cart items
+// Get cart items with variation details
 $user_id = $_SESSION['user_id'];
 $stmt = $db->prepare("
-    SELECT c.*, p.name, p.price, p.image 
+    SELECT c.*, p.name, p.price AS base_price, p.image, pv.size, pv.price_adjustment, pv.stock
     FROM cart c 
-    JOIN products p ON c.product_id = p.id 
+    JOIN products p ON c.product_id = p.product_id 
+    LEFT JOIN product_variations pv ON c.variation_id = pv.variation_id 
     WHERE c.user_id = ?
 ");
 $stmt->execute([$user_id]);
@@ -99,7 +100,8 @@ $cart_items = $stmt->fetchAll(PDO::FETCH_ASSOC);
 // Calculate total
 $subtotal = 0;
 foreach ($cart_items as $item) {
-    $subtotal += $item['price'] * $item['quantity'];
+    $item_price = $item['base_price'] + ($item['price_adjustment'] ?? 0);
+    $subtotal += $item_price * $item['quantity'];
 }
 $shipping = 50; // Flat rate shipping
 $total = $subtotal + $shipping;
@@ -187,6 +189,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['checkout'])) {
                 throw new Exception("Invalid payment method selected.");
         }
         
+        // Validate stock for each item
+        foreach ($cart_items as $item) {
+            if ($item['variation_id']) {
+                $stmt = $db->prepare("SELECT stock FROM product_variations WHERE variation_id = ?");
+                $stmt->execute([$item['variation_id']]);
+                $stock = $stmt->fetchColumn();
+                
+                if ($stock === false || $stock < $item['quantity']) {
+                    throw new Exception("Insufficient stock for {$item['name']} (Size: {$item['size']}). Available: " . ($stock ?: 0));
+                }
+            }
+        }
+        
         // Start transaction
         $db->beginTransaction();
         
@@ -205,22 +220,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['checkout'])) {
             
             // 2. Add order items
             foreach ($cart_items as $item) {
+                $item_price = $item['base_price'] + ($item['price_adjustment'] ?? 0);
                 $stmt = $db->prepare("
-                    INSERT INTO order_items (order_id, product_id, quantity, price) 
-                    VALUES (?, ?, ?, ?)
+                    INSERT INTO order_items (order_id, product_id, variation_id, quantity, price) 
+                    VALUES (?, ?, ?, ?, ?)
                 ");
                 $stmt->execute([
                     $order_id,
                     $item['product_id'],
+                    $item['variation_id'] ?: null,
                     $item['quantity'],
-                    $item['price']
+                    $item_price
                 ]);
                 
-                // 3. Update product stock
-                $stmt = $db->prepare("
-                    UPDATE products SET stock = stock - ? WHERE id = ?
-                ");
-                $stmt->execute([$item['quantity'], $item['product_id']]);
+                // 3. Update variation stock
+                if ($item['variation_id']) {
+                    $stmt = $db->prepare("
+                        UPDATE product_variations SET stock = stock - ? 
+                        WHERE variation_id = ?
+                    ");
+                    $stmt->execute([$item['quantity'], $item['variation_id']]);
+                }
             }
             
             // 4. Create payment record
@@ -367,7 +387,7 @@ if ($auth->isLoggedIn()) {
         .header-right {
             display: flex;
             align-items: center;
-            gap: 28rem;
+            gap: 2rem; /* Adjusted gap for better alignment */
         }
 
         .logo {
@@ -666,6 +686,11 @@ if ($auth->isLoggedIn()) {
             flex: 1;
         }
 
+        .cart-item-size {
+            color: var(--text-muted);
+            font-size: 0.9rem;
+        }
+
         /* Footer */
         footer {
             background: linear-gradient(135deg, var(--primary-color), var(--secondary-color));
@@ -816,7 +841,6 @@ if ($auth->isLoggedIn()) {
                 <?php else: ?>
                     <a href="login.php" title="Login"><i class="fas fa-sign-in-alt"></i></a>
                     <a href="register.php" title="Register"><i class="fas fa-user-plus"></i></a>
-                    
                 <?php endif; ?>
             </div>
         </div>
@@ -937,24 +961,6 @@ if ($auth->isLoggedIn()) {
                     <?php endif; ?>
                 </div>
                 
-                <!-- Wallet section -->
-                <?php if ($wallet_balance < $total): ?>
-                <div class="wallet-section">
-                    <div class="wallet-balance">
-                        Your wallet balance: <span>₱<?php echo number_format($wallet_balance, 2); ?></span>
-                    </div>
-                    <p>Add funds to your wallet to complete your purchase:</p>
-                    <form method="POST" class="wallet-form">
-                        <input type="number" name="fund_amount" class="form-control" 
-                               placeholder="Amount to add" min="1" step="0.01"
-                               value="<?php echo max(1, ceil($total - $wallet_balance)); ?>">
-                        <button type="submit" name="add_funds" class="btn">
-                            <i class="fas fa-plus-circle"></i> Add Funds
-                        </button>
-                    </form>
-                </div>
-                <?php endif; ?>
-                
                 <!-- Payment details (shown based on selection) -->
                 <div id="payment-details"></div>
             </div>
@@ -964,13 +970,18 @@ if ($auth->isLoggedIn()) {
                 
                 <?php foreach ($cart_items as $item): ?>
                     <div class="cart-item">
-                        <img src="assets/images/products/<?php echo htmlspecialchars($item['image']); ?>" 
-                             alt="<?php echo htmlspecialchars($item['name']); ?>" class="cart-item-image">
+                        <img src="assets/images/products/<?php echo htmlspecialchars($item['image'] ?: 'default-product.jpg'); ?>" 
+                             alt="<?php echo htmlspecialchars($item['name']); ?>" 
+                             class="cart-item-image"
+                             onerror="this.src='assets/images/products/default-product.jpg'">
                         <div class="cart-item-details">
                             <h4><?php echo htmlspecialchars($item['name']); ?></h4>
-                            <p>₱<?php echo number_format($item['price'], 2); ?> × <?php echo $item['quantity']; ?></p>
+                            <?php if ($item['size']): ?>
+                                <p class="cart-item-size">Size: <?php echo htmlspecialchars($item['size']); ?></p>
+                            <?php endif; ?>
+                            <p>₱<?php echo number_format($item['base_price'] + ($item['price_adjustment'] ?? 0), 2); ?> × <?php echo $item['quantity']; ?></p>
                         </div>
-                        <div>₱<?php echo number_format($item['price'] * $item['quantity'], 2); ?></div>
+                        <div>₱<?php echo number_format(($item['base_price'] + ($item['price_adjustment'] ?? 0)) * $item['quantity'], 2); ?></div>
                     </div>
                 <?php endforeach; ?>
                 
@@ -1049,7 +1060,7 @@ if ($auth->isLoggedIn()) {
         </div>
         
         <div class="copyright">
-            &copy; <?php echo date('Y'); ?> Urban Trends Apparel. All rights reserved.
+            © <?php echo date('Y'); ?> Urban Trends Apparel. All rights reserved.
         </div>
     </div>
 </footer>

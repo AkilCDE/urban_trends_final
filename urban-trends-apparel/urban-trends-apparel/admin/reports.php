@@ -1,10 +1,8 @@
 <?php
-
 define('DB_HOST', 'localhost');
 define('DB_USER', 'root');
 define('DB_PASS', '');
 define('DB_NAME', 'urban_trends');
-
 
 try {
     $db = new PDO("mysql:host=".DB_HOST.";dbname=".DB_NAME, DB_USER, DB_PASS);
@@ -13,10 +11,9 @@ try {
     die("Connection failed: " . $e->getMessage());
 }
 
-
 session_start();
 
-if (!isset($_SESSION['user_id']) || !isset($_SESSION['is_admin']) || $_SESSION['is_admin'] != 1) {
+if (!isset($_SESSION['user_id'])) {
     header("Location: ../login.php");
     exit;
 }
@@ -57,18 +54,18 @@ if ($report_type == 'sales') {
 if ($report_type == 'products') {
     $product_report = $db->prepare("
         SELECT 
-            p.id,
+            p.product_id,
             p.name,
             p.category,
             SUM(oi.quantity) AS total_quantity,
             SUM(oi.quantity * oi.price) AS total_revenue,
             COUNT(DISTINCT oi.order_id) AS order_count
         FROM order_items oi
-        JOIN products p ON oi.product_id = p.id
-        JOIN orders o ON oi.order_id = o.id
+        JOIN products p ON oi.product_id = p.product_id
+        JOIN orders o ON oi.order_id = o.order_id
         WHERE o.order_date BETWEEN ? AND ?
         AND o.status = 'delivered'
-        GROUP BY p.id
+        GROUP BY p.product_id
         ORDER BY total_revenue DESC
         LIMIT 50
     ");
@@ -80,18 +77,18 @@ if ($report_type == 'products') {
 if ($report_type == 'customers') {
     $customer_report = $db->prepare("
         SELECT 
-            u.id,
+            u.user_id,
             u.firstname,
             u.lastname,
             u.email,
-            COUNT(o.id) AS order_count,
+            COUNT(o.order_id) AS order_count,
             SUM(o.total_amount) AS total_spent,
             MAX(o.order_date) AS last_order_date
         FROM users u
-        JOIN orders o ON u.id = o.user_id
+        JOIN orders o ON u.user_id = o.user_id
         WHERE o.order_date BETWEEN ? AND ?
         AND o.status = 'delivered'
-        GROUP BY u.id
+        GROUP BY u.user_id
         ORDER BY total_spent DESC
         LIMIT 50
     ");

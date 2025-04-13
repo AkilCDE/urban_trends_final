@@ -1,10 +1,8 @@
 <?php
-
 define('DB_HOST', 'localhost');
 define('DB_USER', 'root');
 define('DB_PASS', '');
 define('DB_NAME', 'urban_trends');
-
 
 try {
     $db = new PDO("mysql:host=".DB_HOST.";dbname=".DB_NAME, DB_USER, DB_PASS);
@@ -22,13 +20,12 @@ if (!isset($_SESSION['user_id']) || !isset($_SESSION['is_admin']) || $_SESSION['
 
 // Handle form submissions
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    // Add new product
+    // Add new product with size variations
     if (isset($_POST['add_product'])) {
         $name = htmlspecialchars($_POST['name']);
         $description = htmlspecialchars($_POST['description']);
         $price = floatval($_POST['price']);
         $category = htmlspecialchars($_POST['category']);
-        $stock = intval($_POST['stock']);
         
         // Handle image upload
         $image = 'default.jpg';
@@ -48,17 +45,58 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
         }
         
-        $stmt = $db->prepare("INSERT INTO products (name, description, price, category, stock, image) VALUES (?, ?, ?, ?, ?, ?)");
-        $stmt->execute([$name, $description, $price, $category, $stock, $image]);
+        try {
+            $db->beginTransaction();
+            
+            // Insert the main product
+            $stmt = $db->prepare("INSERT INTO products (name, description, price, category, image) VALUES (?, ?, ?, ?, ?)");
+            $stmt->execute([$name, $description, $price, $category, $image]);
+            $product_id = $db->lastInsertId();
+            
+            // Insert size variations
+            if (isset($_POST['size']) && is_array($_POST['size'])) {
+                $sizes = $_POST['size'];
+                $price_adjustments = $_POST['price_adjustment'];
+                $stocks = $_POST['stock'];
+                
+                for ($i = 0; $i < count($sizes); $i++) {
+                    $size = $sizes[$i];
+                    $price_adjustment = floatval($price_adjustments[$i] ?? 0);
+                    $stock = intval($stocks[$i]);
+                    
+                    $stmt = $db->prepare("INSERT INTO product_variations (product_id, size, stock, price_adjustment, is_default) VALUES (?, ?, ?, ?, ?)");
+                    $stmt->execute([$product_id, $size, $stock, $price_adjustment, ($size == 'M' ? 1 : 0)]);
+                }
+            }
+            
+            $db->commit();
+            $_SESSION['success_message'] = "Product added successfully with size variations!";
+        } catch (Exception $e) {
+            $db->rollBack();
+            $_SESSION['error_message'] = "Error adding product: " . $e->getMessage();
+        }
+        
+        header("Location: dashboard.php");
+        exit;
     }
     
-    // Update stock
+    // Update stock for specific size variation
     if (isset($_POST['update_stock'])) {
         $product_id = intval($_POST['product_id']);
+        $variation_id = intval($_POST['variation_id']);
         $stock_change = intval($_POST['stock_change']);
         
-        $stmt = $db->prepare("UPDATE products SET stock = stock + ? WHERE id = ?");
-        $stmt->execute([$stock_change, $product_id]);
+        try {
+            $stmt = $db->prepare("UPDATE product_variations SET stock = stock + ? WHERE variation_id = ?");
+            $stmt->execute([$stock_change, $variation_id]);
+            
+            $_SESSION['success_message'] = "Stock updated successfully!";
+        } catch (PDOException $e) {
+            $_SESSION['error_message'] = "Error updating stock: " . $e->getMessage();
+        }
+        
+        header("Location: dashboard.php");
+        exit;
     }
     
     // Handle order shipping confirmation
@@ -67,7 +105,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         
         try {
             // Update order status to 'shipped' and set shipping date
-            $stmt = $db->prepare("UPDATE orders SET status = 'shipped', shipping_date = NOW() WHERE id = ?");
+            $stmt = $db->prepare("UPDATE orders SET status = 'shipped', shipping_date = NOW() WHERE order_id = ?");
             $stmt->execute([$order_id]);
             
             $_SESSION['success_message'] = "Order #$order_id has been marked as shipped!";
@@ -86,7 +124,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         
         try {
             // Update order status to 'delivered' and set delivery date
-            $stmt = $db->prepare("UPDATE orders SET status = 'delivered', delivery_date = NOW() WHERE id = ?");
+            $stmt = $db->prepare("UPDATE orders SET status = 'delivered', delivery_date = NOW() WHERE order_id = ?");
             $stmt->execute([$order_id]);
             
             // Also update shipping status if needed
@@ -110,7 +148,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         
         try {
             // Update order status to 'cancelled' and set cancellation reason
-            $stmt = $db->prepare("UPDATE orders SET status = 'cancelled', cancellation_reason = ? WHERE id = ?");
+            $stmt = $db->prepare("UPDATE orders SET status = 'cancelled', cancellation_reason = ? WHERE order_id = ?");
             $stmt->execute([$reason, $order_id]);
             
             $_SESSION['success_message'] = "Order #$order_id has been cancelled!";
@@ -131,13 +169,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         
         try {
             // Get order details including user email
-            $stmt = $db->prepare("SELECT u.email, o.user_id FROM orders o JOIN users u ON o.user_id = u.id WHERE o.id = ?");
+            $stmt = $db->prepare("SELECT u.email, o.user_id FROM orders o JOIN users u ON o.user_id = u.user_id WHERE o.order_id = ?");
             $stmt->execute([$order_id]);
             $order = $stmt->fetch(PDO::FETCH_ASSOC);
             
             if ($order) {
                 // Update order status
-                $stmt = $db->prepare("UPDATE orders SET status = ? WHERE id = ?");
+                $stmt = $db->prepare("UPDATE orders SET status = ? WHERE order_id = ?");
                 $stmt->execute([$new_status, $order_id]);
                 
                 // Add to status history
@@ -157,9 +195,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 if ($new_status === 'refunded') {
                     $stmt = $db->prepare("
                         INSERT INTO payments (order_id, amount, payment_method, status, payment_date)
-                        SELECT id, total_amount, 'refund', 'completed', NOW() 
+                        SELECT order_id, total_amount, 'refund', 'completed', NOW() 
                         FROM orders 
-                        WHERE id = ?
+                        WHERE order_id = ?
                     ");
                     $stmt->execute([$order_id]);
                 }
@@ -185,47 +223,56 @@ $totalOrders = $db->query("SELECT COUNT(*) FROM orders")->fetchColumn();
 $totalCustomers = $db->query("SELECT COUNT(*) FROM users WHERE is_admin = 0")->fetchColumn();
 $totalProducts = $db->query("SELECT COUNT(*) FROM products")->fetchColumn();
 
-// Get low stock products (less than 10 in stock)
-$lowStockProducts = $db->query("SELECT * FROM products WHERE stock < 10 ORDER BY stock ASC LIMIT 5")->fetchAll(PDO::FETCH_ASSOC);
+// Get low stock products (any variation with less than 10 in stock)
+$lowStockProducts = $db->query("
+    SELECT p.product_id, p.name, p.category, p.image, 
+           MIN(pv.stock) as min_stock 
+    FROM products p 
+    JOIN product_variations pv ON p.product_id = pv.product_id 
+    GROUP BY p.product_id 
+    HAVING MIN(pv.stock) < 10 
+    ORDER BY min_stock ASC 
+    LIMIT 5
+")->fetchAll(PDO::FETCH_ASSOC);
 
 // Get recent orders
-$recentOrders = $db->query("SELECT o.*, u.email FROM orders o JOIN users u ON o.user_id = u.id ORDER BY order_date DESC LIMIT 5")->fetchAll(PDO::FETCH_ASSOC);
+$recentOrders = $db->query("SELECT o.*, u.email FROM orders o JOIN users u ON o.user_id = u.user_id ORDER BY order_date DESC LIMIT 5")->fetchAll(PDO::FETCH_ASSOC);
 
 // Get return/refund requests with more details
 $returnRequests = $db->query("
-    SELECT o.id as order_id, o.status, o.order_date, o.total_amount, 
-           u.id as user_id, u.email, u.firstname, u.lastname,
-           (SELECT GROUP_CONCAT(oi.product_id) FROM order_items oi WHERE oi.order_id = o.id) as product_ids,
+    SELECT o.order_id, o.status, o.order_date, o.total_amount, 
+           u.user_id, u.email, u.firstname, u.lastname,
+           (SELECT GROUP_CONCAT(oi.product_id) FROM order_items oi WHERE oi.order_id = o.order_id) as product_ids,
            (SELECT GROUP_CONCAT(p.name SEPARATOR ', ') 
             FROM order_items oi 
-            JOIN products p ON oi.product_id = p.id 
-            WHERE oi.order_id = o.id) as product_names,
+            JOIN products p ON oi.product_id = p.product_id 
+            WHERE oi.order_id = o.order_id) as product_names,
            (SELECT notes FROM order_status_history 
-            WHERE order_id = o.id AND status = 'return_requested' 
+            WHERE order_id = o.order_id AND status = 'return_requested' 
             ORDER BY changed_at DESC LIMIT 1) as return_reason
     FROM orders o
-    JOIN users u ON o.user_id = u.id
+    JOIN users u ON o.user_id = u.user_id
     WHERE o.status IN ('return_requested', 'returned', 'refunded')
     ORDER BY o.order_date DESC
 ")->fetchAll(PDO::FETCH_ASSOC);
 
 // Get popular products (most ordered)
 $popularProducts = $db->query("
-    SELECT p.id, p.name, p.image, SUM(oi.quantity) as total_ordered 
+    SELECT p.product_id, p.name, p.image, SUM(oi.quantity) as total_ordered 
     FROM order_items oi 
-    JOIN products p ON oi.product_id = p.id 
-    GROUP BY p.id 
+    JOIN products p ON oi.product_id = p.product_id 
+    GROUP BY p.product_id 
     ORDER BY total_ordered DESC 
     LIMIT 5
 ")->fetchAll(PDO::FETCH_ASSOC);
 
 // Get frequent customers
 $frequentCustomers = $db->query("
-    SELECT u.id, u.email, u.firstname, u.lastname, COUNT(o.id) as order_count 
+    SELECT u.user_id, u.email, u.firstname, u.lastname, COUNT(o.order_id) as order_count 
     FROM users u 
-    JOIN orders o ON u.id = o.user_id 
+    JOIN orders o ON u.user_id = o.user_id 
     WHERE u.is_admin = 0 
-    GROUP BY u.id 
+    GROUP BY u.user_id 
     ORDER BY order_count DESC 
     LIMIT 5
 ")->fetchAll(PDO::FETCH_ASSOC);
@@ -656,6 +703,30 @@ if (isset($_GET['logout'])) {
             box-shadow: 0 0 0 3px rgba(67, 97, 238, 0.2);
         }
         
+        /* Size Variations */
+        .size-variations-container {
+            margin-bottom: 10px;
+        }
+        
+        .size-variation {
+            margin-bottom: 10px;
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+        
+        .size-variation select,
+        .size-variation input {
+            flex: 1;
+        }
+        
+        .size-variation .remove-size {
+            width: 40px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        
         /* Charts */
         .chart-container {
             background-color: white;
@@ -919,6 +990,15 @@ if (isset($_GET['logout'])) {
                 border-left: none;
                 border-bottom: 3px solid var(--accent-color);
             }
+            
+            .size-variation {
+                flex-direction: column;
+                align-items: stretch;
+            }
+            
+            .size-variation .remove-size {
+                width: 100%;
+            }
         }
     </style>
 </head>
@@ -1007,7 +1087,7 @@ if (isset($_GET['logout'])) {
                         <tbody>
                             <?php foreach ($recentOrders as $order): ?>
                                 <tr>
-                                    <td>#<?php echo $order['id']; ?></td>
+                                    <td>#<?php echo $order['order_id']; ?></td>
                                     <td><?php echo $order['email']; ?></td>
                                     <td><?php echo date('M d, Y', strtotime($order['order_date'])); ?></td>
                                     <td>₱<?php echo number_format($order['total_amount'], 2); ?></td>
@@ -1017,18 +1097,18 @@ if (isset($_GET['logout'])) {
                                         </span>
                                     </td>
                                     <td>
-                                        <a href="orders.php?id=<?php echo $order['id']; ?>" class="btn btn-primary">
+                                        <a href="orders.php?id=<?php echo $order['order_id']; ?>" class="btn btn-primary">
                                             <i class="fas fa-eye"></i> View
                                         </a>
                                         <?php if ($order['status'] == 'processing'): ?>
-                                            <button type="button" class="btn btn-success" onclick="showShippingModal(<?php echo $order['id']; ?>)">
+                                            <button type="button" class="btn btn-success" onclick="showShippingModal(<?php echo $order['order_id']; ?>)">
                                                 <i class="fas fa-truck"></i> Ship
                                             </button>
-                                            <button type="button" class="btn btn-danger" onclick="showCancelModal(<?php echo $order['id']; ?>)">
+                                            <button type="button" class="btn btn-danger" onclick="showCancelModal(<?php echo $order['order_id']; ?>)">
                                                 <i class="fas fa-times"></i> Cancel
                                             </button>
                                         <?php elseif ($order['status'] == 'shipped'): ?>
-                                            <button type="button" class="btn btn-success" onclick="showDeliveryModal(<?php echo $order['id']; ?>)">
+                                            <button type="button" class="btn btn-success" onclick="showDeliveryModal(<?php echo $order['order_id']; ?>)">
                                                 <i class="fas fa-check-circle"></i> Deliver
                                             </button>
                                         <?php endif; ?>
@@ -1056,12 +1136,12 @@ if (isset($_GET['logout'])) {
                                     <td><?php echo $product['name']; ?></td>
                                     <td><?php echo ucfirst(str_replace('_', ' ', $product['category'])); ?></td>
                                     <td>
-                                        <span class="status <?php echo $product['stock'] < 5 ? 'low-stock' : 'warning'; ?>">
-                                            <?php echo $product['stock']; ?> left
+                                        <span class="status <?php echo $product['min_stock'] < 5 ? 'low-stock' : 'warning'; ?>">
+                                            <?php echo $product['min_stock']; ?> left (lowest size)
                                         </span>
                                     </td>
                                     <td>
-                                        <button class="btn btn-primary" onclick="openStockModal(<?php echo $product['id']; ?>, '<?php echo $product['name']; ?>')">
+                                        <button class="btn btn-primary" onclick="openStockModal(<?php echo $product['product_id']; ?>, '<?php echo $product['name']; ?>')">
                                             <i class="fas fa-plus"></i> Restock
                                         </button>
                                     </td>
@@ -1087,13 +1167,22 @@ if (isset($_GET['logout'])) {
                             <th>Product</th>
                             <th>Category</th>
                             <th>Price</th>
-                            <th>Stock</th>
+                            <th>Sizes Available</th>
                             <th>Actions</th>
                         </tr>
                     </thead>
                     <tbody>
                         <?php 
-                        $allProducts = $db->query("SELECT * FROM products ORDER BY stock ASC")->fetchAll(PDO::FETCH_ASSOC);
+                        $allProducts = $db->query("
+                            SELECT p.*, 
+                                   GROUP_CONCAT(CONCAT(pv.size, ' (', pv.stock, ')') ORDER BY 
+                                   FIELD(pv.size, 'XS','S','M','L','XL','XXL') SEPARATOR ', ') as size_info
+                            FROM products p
+                            LEFT JOIN product_variations pv ON p.product_id = pv.product_id
+                            GROUP BY p.product_id
+                            ORDER BY p.name ASC
+                        ")->fetchAll(PDO::FETCH_ASSOC);
+                        
                         foreach ($allProducts as $product): 
                         ?>
                             <tr>
@@ -1103,17 +1192,10 @@ if (isset($_GET['logout'])) {
                                 <td><?php echo $product['name']; ?></td>
                                 <td><?php echo ucfirst(str_replace('_', ' ', $product['category'])); ?></td>
                                 <td>₱<?php echo number_format($product['price'], 2); ?></td>
+                                <td><?php echo $product['size_info'] ?? 'No sizes available'; ?></td>
                                 <td>
-                                    <span class="status <?php 
-                                        echo $product['stock'] < 5 ? 'low-stock' : 
-                                             ($product['stock'] < 10 ? 'warning' : 'success'); 
-                                    ?>">
-                                        <?php echo $product['stock']; ?>
-                                    </span>
-                                </td>
-                                <td>
-                                    <button class="btn btn-primary" onclick="openStockModal(<?php echo $product['id']; ?>, '<?php echo $product['name']; ?>')">
-                                        <i class="fas fa-edit"></i> Update
+                                    <button class="btn btn-primary" onclick="openStockModal(<?php echo $product['product_id']; ?>, '<?php echo $product['name']; ?>')">
+                                        <i class="fas fa-edit"></i> Manage
                                     </button>
                                 </td>
                             </tr>
@@ -1152,7 +1234,7 @@ if (isset($_GET['logout'])) {
                                     </td>
                                     <td><?php echo $product['total_ordered']; ?></td>
                                     <td>
-                                        <a href="products.php?edit=<?php echo $product['id']; ?>" class="btn btn-primary">
+                                        <a href="products.php?edit=<?php echo $product['product_id']; ?>" class="btn btn-primary">
                                             <i class="fas fa-edit"></i> Edit
                                         </a>
                                     </td>
@@ -1178,7 +1260,7 @@ if (isset($_GET['logout'])) {
                                     <td><?php echo $customer['firstname'] . ' ' . $customer['lastname']; ?><br><small><?php echo $customer['email']; ?></small></td>
                                     <td><?php echo $customer['order_count']; ?></td>
                                     <td>
-                                        <a href="customers.php?id=<?php echo $customer['id']; ?>" class="btn btn-primary">
+                                        <a href="customers.php?id=<?php echo $customer['user_id']; ?>" class="btn btn-primary">
                                             <i class="fas fa-eye"></i> View
                                         </a>
                                     </td>
@@ -1206,7 +1288,7 @@ if (isset($_GET['logout'])) {
                     </div>
                     
                     <div class="form-group">
-                        <label for="price">Price (₱)</label>
+                        <label for="price">Base Price (₱)</label>
                         <input type="number" id="price" name="price" step="0.01" min="0" class="form-control" required>
                     </div>
                     
@@ -1231,8 +1313,25 @@ if (isset($_GET['logout'])) {
                     </div>
                     
                     <div class="form-group">
-                        <label for="stock">Initial Stock</label>
-                        <input type="number" id="stock" name="stock" min="0" class="form-control" required>
+                        <label>Size Variations</label>
+                        <div class="size-variations-container">
+                            <div class="size-variation">
+                                <select name="size[]" class="form-control">
+                                    <option value="XS">XS</option>
+                                    <option value="S">S</option>
+                                    <option value="M" selected>M</option>
+                                    <option value="L">L</option>
+                                    <option value="XL">XL</option>
+                                    <option value="XXL">XXL</option>
+                                </select>
+                                <input type="number" name="price_adjustment[]" step="0.01" placeholder="Price Adjustment" class="form-control">
+                                <input type="number" name="stock[]" min="0" placeholder="Stock" class="form-control" required>
+                                <button type="button" class="btn btn-danger remove-size"><i class="fas fa-times"></i></button>
+                            </div>
+                        </div>
+                        <button type="button" class="btn btn-primary" id="add-size-variation" style="margin-top: 10px;">
+                            <i class="fas fa-plus"></i> Add Another Size
+                        </button>
                     </div>
                     
                     <div class="form-group">
@@ -1315,6 +1414,12 @@ if (isset($_GET['logout'])) {
             <h3 id="modalTitle"></h3>
             <form id="stockForm" method="POST">
                 <input type="hidden" id="product_id" name="product_id">
+                <div class="form-group">
+                    <label for="variation_id">Size</label>
+                    <select id="variation_id" name="variation_id" class="form-control" required>
+                        <!-- Options will be populated by JavaScript -->
+                    </select>
+                </div>
                 <div class="form-group">
                     <label for="stock_change">Stock Adjustment</label>
                     <div style="display: flex; align-items: center;">
@@ -1481,11 +1586,29 @@ if (isset($_GET['logout'])) {
         }
         
         // Stock modal functions
-        function openStockModal(productId, productName) {
-            document.getElementById('product_id').value = productId;
-            document.getElementById('modalTitle').textContent = `Update Stock: ${productName}`;
-            document.getElementById('stock_change').value = 0;
-            document.getElementById('stockModal').style.display = 'flex';
+        async function openStockModal(productId, productName) {
+            try {
+                const response = await fetch(`get_product_variations.php?product_id=${productId}`);
+                const variations = await response.json();
+                
+                const variationSelect = document.getElementById('variation_id');
+                variationSelect.innerHTML = '';
+                
+                variations.forEach(variation => {
+                    const option = document.createElement('option');
+                    option.value = variation.variation_id;
+                    option.textContent = `${variation.size} (Current stock: ${variation.stock})`;
+                    variationSelect.appendChild(option);
+                });
+                
+                document.getElementById('product_id').value = productId;
+                document.getElementById('modalTitle').textContent = `Update Stock: ${productName}`;
+                document.getElementById('stock_change').value = 0;
+                document.getElementById('stockModal').style.display = 'flex';
+            } catch (error) {
+                console.error('Error fetching variations:', error);
+                alert('Error loading size variations');
+            }
         }
         
         function closeStockModal() {
@@ -1661,6 +1784,35 @@ if (isset($_GET['logout'])) {
                     hideCancelModal();
                     hideReturnModal();
                     hideReturnDetailsModal();
+                }
+            });
+            
+            // Add size variation row
+            document.getElementById('add-size-variation').addEventListener('click', function() {
+                const container = document.querySelector('.size-variations-container');
+                const newRow = document.createElement('div');
+                newRow.className = 'size-variation';
+                newRow.innerHTML = `
+                    <select name="size[]" class="form-control">
+                        <option value="XS">XS</option>
+                        <option value="S">S</option>
+                        <option value="M">M</option>
+                        <option value="L">L</option>
+                        <option value="XL">XL</option>
+                        <option value="XXL">XXL</option>
+                    </select>
+                    <input type="number" name="price_adjustment[]" step="0.01" placeholder="Price Adjustment" class="form-control">
+                    <input type="number" name="stock[]" min="0" placeholder="Stock" class="form-control" required>
+                    <button type="button" class="btn btn-danger remove-size"><i class="fas fa-times"></i></button>
+                `;
+                container.appendChild(newRow);
+            });
+            
+            // Remove size variation row
+            document.addEventListener('click', function(e) {
+                if (e.target.classList.contains('remove-size') || e.target.parentElement.classList.contains('remove-size')) {
+                    const btn = e.target.classList.contains('remove-size') ? e.target : e.target.parentElement;
+                    btn.closest('.size-variation').remove();
                 }
             });
         });
