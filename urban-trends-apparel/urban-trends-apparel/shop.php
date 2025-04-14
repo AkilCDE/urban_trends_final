@@ -1239,69 +1239,50 @@ function isInWishlist($db, $user_id, $product_id) {
                         this.classList.add('selected');
                         
                         // Update variation ID
-                        variationInput.value = this.dataset.variationId;
-                        
-                        // Update quantity max
-                        const maxStock = parseInt(this.dataset.stock);
-                        quantityInput.max = maxStock;
-                        if (parseInt(quantityInput.value) > maxStock) {
-                            quantityInput.value = maxStock;
+                        if (variationInput) {
+                            variationInput.value = this.dataset.variationId;
                         }
                         
-                        // Update price display
+                        // Update quantity max
+                        if (quantityInput) {
+                            const maxStock = parseInt(this.dataset.stock);
+                            quantityInput.max = maxStock;
+                            if (parseInt(quantityInput.value) > maxStock) {
+                                quantityInput.value = maxStock;
+                            }
+                        }
+                        
+                        // Update price
                         const priceAdjustment = parseFloat(this.dataset.priceAdjustment) || 0;
                         const basePrice = parseFloat(card.querySelector('.product-price').dataset.basePrice);
                         const newPrice = basePrice + priceAdjustment;
                         card.querySelector('.product-price').textContent = '₱' + newPrice.toFixed(2);
                         
-                        // Enable buttons if quantity is valid
-                        updateButtonState();
+                        // Enable buttons
+                        if (buyBtn) buyBtn.disabled = false;
+                        if (cartBtn) cartBtn.disabled = false;
                     });
                 });
-
+                
                 // Quantity controls
-                minusBtn.addEventListener('click', function() {
-                    let value = parseInt(quantityInput.value);
-                    if (value > 1) {
-                        quantityInput.value = value - 1;
-                        updateButtonState();
-                    }
-                });
-
-                plusBtn.addEventListener('click', function() {
-                    let value = parseInt(quantityInput.value);
-                    const maxStock = parseInt(quantityInput.max);
-                    if (value < maxStock) {
-                        quantityInput.value = value + 1;
-                        updateButtonState();
-                    } else {
-                        alert(`Only ${maxStock} items available in stock`);
-                    }
-                });
-
-                // Update button state
-                function updateButtonState() {
-                    const hasVariation = sizeButtons.length > 0;
-                    const sizeSelected = variationInput && variationInput.value !== '';
-                    const quantityValid = parseInt(quantityInput.value) > 0;
-                    
-                    buyBtn.disabled = hasVariation && !sizeSelected || !quantityValid;
-                    cartBtn.disabled = hasVariation && !sizeSelected || !quantityValid;
+                if (minusBtn && quantityInput) {
+                    minusBtn.addEventListener('click', function() {
+                        const currentValue = parseInt(quantityInput.value);
+                        if (currentValue > 1) {
+                            quantityInput.value = currentValue - 1;
+                        }
+                    });
                 }
-
-                // Form submission
-                form.addEventListener('submit', function(e) {
-                    if (sizeButtons.length > 0 && (!variationInput || variationInput.value === '')) {
-                        e.preventDefault();
-                        alert('Please select a size');
-                        return;
-                    }
-                    if (!quantityInput.value || parseInt(quantityInput.value) <= 0) {
-                        e.preventDefault();
-                        alert('Please select a valid quantity');
-                        return;
-                    }
-                });
+                
+                if (plusBtn && quantityInput) {
+                    plusBtn.addEventListener('click', function() {
+                        const currentValue = parseInt(quantityInput.value);
+                        const maxValue = parseInt(quantityInput.max);
+                        if (currentValue < maxValue) {
+                            quantityInput.value = currentValue + 1;
+                        }
+                    });
+                }
             });
         }
 

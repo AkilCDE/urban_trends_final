@@ -99,11 +99,12 @@ $cart_items = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
 // Calculate total
 $subtotal = 0;
+$shipping = 0;
 foreach ($cart_items as $item) {
     $item_price = $item['base_price'] + ($item['price_adjustment'] ?? 0);
     $subtotal += $item_price * $item['quantity'];
+    $shipping += 50 * $item['quantity']; // 50 pesos per product
 }
-$shipping = 50; // Flat rate shipping
 $total = $subtotal + $shipping;
 
 // Get user's wallet balance
@@ -628,12 +629,56 @@ if ($auth->isLoggedIn()) {
         }
         
         /* Order Summary */
+        .order-summary {
+            margin-top: 2rem;
+        }
+        
+        .order-summary h3 {
+            margin-bottom: 1.5rem;
+            color: var(--accent-color);
+            border-bottom: 1px solid #444;
+            padding-bottom: 0.5rem;
+        }
+        
         .order-summary-item {
             display: flex;
             justify-content: space-between;
             margin-bottom: 1rem;
             padding-bottom: 1rem;
             border-bottom: 1px solid #444;
+        }
+        
+        .item-details {
+            display: flex;
+            gap: 1rem;
+        }
+        
+        .item-image {
+            width: 80px;
+            height: 80px;
+            object-fit: cover;
+            border-radius: var(--border-radius);
+        }
+        
+        .item-price {
+            flex: 1;
+            text-align: right;
+        }
+        
+        .item-price p {
+            margin-bottom: 5px;
+        }
+        
+        .item-price div {
+            margin-bottom: 5px;
+        }
+        
+        .shipping-cost {
+            color: var(--text-muted);
+            font-size: 0.9rem;
+            margin-top: 10px;
+            padding-top: 10px;
+            border-top: 1px solid rgba(255, 255, 255, 0.1);
         }
         
         .order-total {
@@ -968,36 +1013,44 @@ if ($auth->isLoggedIn()) {
             <div class="checkout-section">
                 <h2>Order Summary</h2>
                 
-                <?php foreach ($cart_items as $item): ?>
-                    <div class="cart-item">
-                        <img src="assets/images/products/<?php echo htmlspecialchars($item['image'] ?: 'default-product.jpg'); ?>" 
-                             alt="<?php echo htmlspecialchars($item['name']); ?>" 
-                             class="cart-item-image"
-                             onerror="this.src='assets/images/products/default-product.jpg'">
-                        <div class="cart-item-details">
-                            <h4><?php echo htmlspecialchars($item['name']); ?></h4>
-                            <?php if ($item['size']): ?>
-                                <p class="cart-item-size">Size: <?php echo htmlspecialchars($item['size']); ?></p>
-                            <?php endif; ?>
-                            <p>₱<?php echo number_format($item['base_price'] + ($item['price_adjustment'] ?? 0), 2); ?> × <?php echo $item['quantity']; ?></p>
+                <div class="order-summary">
+                    <?php foreach ($cart_items as $item): ?>
+                        <div class="order-summary-item">
+                            <div class="item-details">
+                                <img src="assets/images/products/<?php echo htmlspecialchars($item['image']); ?>" 
+                                     alt="<?php echo htmlspecialchars($item['name']); ?>" 
+                                     class="item-image"
+                                     onerror="this.src='assets/images/products/default-product.jpg'">
+                                <div>
+                                    <h4><?php echo htmlspecialchars($item['name']); ?></h4>
+                                    <?php if ($item['size']): ?>
+                                        <p>Size: <?php echo htmlspecialchars($item['size']); ?></p>
+                                    <?php endif; ?>
+                                    <p>Quantity: <?php echo $item['quantity']; ?></p>
+                                </div>
+                            </div>
+                            <div class="item-price">
+                                <p>₱<?php echo number_format($item['base_price'] + ($item['price_adjustment'] ?? 0), 2); ?> × <?php echo $item['quantity']; ?></p>
+                                <div>₱<?php echo number_format(($item['base_price'] + ($item['price_adjustment'] ?? 0)) * $item['quantity'], 2); ?></div>
+                                <div class="shipping-cost" style="margin-top: 10px;">Shipping: ₱<?php echo number_format(50 * $item['quantity'], 2); ?></div>
+                            </div>
                         </div>
-                        <div>₱<?php echo number_format(($item['base_price'] + ($item['price_adjustment'] ?? 0)) * $item['quantity'], 2); ?></div>
+                    <?php endforeach; ?>
+                    
+                    <div class="order-summary-item">
+                        <span>Subtotal</span>
+                        <span>₱<?php echo number_format($subtotal, 2); ?></span>
                     </div>
-                <?php endforeach; ?>
-                
-                <div class="order-summary-item">
-                    <span>Subtotal</span>
-                    <span>₱<?php echo number_format($subtotal, 2); ?></span>
-                </div>
-                
-                <div class="order-summary-item">
-                    <span>Shipping</span>
-                    <span>₱<?php echo number_format($shipping, 2); ?></span>
-                </div>
-                
-                <div class="order-summary-item order-total">
-                    <span>Total</span>
-                    <span>₱<?php echo number_format($total, 2); ?></span>
+                    
+                    <div class="order-summary-item">
+                        <span>Shipping</span>
+                        <span>₱<?php echo number_format($shipping, 2); ?></span>
+                    </div>
+                    
+                    <div class="order-summary-item order-total">
+                        <span>Total</span>
+                        <span>₱<?php echo number_format($total, 2); ?></span>
+                    </div>
                 </div>
                 
                 <button type="submit" name="checkout" class="checkout-btn" id="completeOrderBtn">

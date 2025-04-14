@@ -531,6 +531,102 @@ class OrderDelivery {
             return false;
         }
     }
+
+    public function getOrderReviews($order_id) {
+        try {
+            // Get all products in the order
+            $stmt = $this->db->prepare("SELECT oi.product_id, p.name as product_name, p.image as product_image
+                                      FROM order_items oi
+                                      JOIN products p ON oi.product_id = p.product_id
+                                      WHERE oi.order_id = ?");
+            $stmt->execute([$order_id]);
+            $products = $stmt->fetchAll(PDO::FETCH_ASSOC);
+            
+            $reviews = [];
+            
+            // Get reviews for each product in the order
+            foreach ($products as $product) {
+                $stmt = $this->db->prepare("SELECT pr.*, u.firstname, u.lastname, u.email
+                                          FROM product_reviews pr
+                                          JOIN users u ON pr.user_id = u.user_id
+                                          WHERE pr.product_id = ? AND pr.order_id = ?
+                                          ORDER BY pr.created_at DESC");
+                $stmt->execute([$product['product_id'], $order_id]);
+                $product_reviews = $stmt->fetchAll(PDO::FETCH_ASSOC);
+                
+                if (!empty($product_reviews)) {
+                    $reviews[$product['product_id']] = [
+                        'product' => $product,
+                        'reviews' => $product_reviews
+                    ];
+                }
+            }
+            
+            return $reviews;
+        } catch(PDOException $e) {
+            error_log("Error getting order reviews: " . $e->getMessage());
+            return [];
+        }
+    }
+    
+    public function getProductReviews($product_id) {
+        try {
+            $stmt = $this->db->prepare("SELECT pr.*, u.firstname, u.lastname, u.email, o.order_id, o.created_at as order_date
+                                      FROM product_reviews pr
+                                      JOIN users u ON pr.user_id = u.user_id
+                                      JOIN orders o ON pr.order_id = o.order_id
+                                      WHERE pr.product_id = ?
+                                      ORDER BY pr.created_at DESC");
+            $stmt->execute([$product_id]);
+            return $stmt->fetchAll(PDO::FETCH_ASSOC);
+        } catch(PDOException $e) {
+            error_log("Error getting product reviews: " . $e->getMessage());
+            return [];
+        }
+    }
+    
+    public function approveReview($review_id) {
+        try {
+            $stmt = $this->db->prepare("UPDATE product_reviews SET is_approved = 1 WHERE review_id = ?");
+            return $stmt->execute([$review_id]);
+        } catch(PDOException $e) {
+            error_log("Error approving review: " . $e->getMessage());
+            return false;
+        }
+    }
+    
+    public function deleteReview($review_id) {
+        try {
+            $stmt = $this->db->prepare("DELETE FROM product_reviews WHERE review_id = ?");
+            return $stmt->execute([$review_id]);
+        } catch(PDOException $e) {
+            error_log("Error deleting review: " . $e->getMessage());
+            return false;
+        }
+    }
+
+    public function updateOrderLocation($order_id, $latitude, $longitude, $location_notes = null) {
+        try {
+            $stmt = $this->db->prepare("UPDATE orders SET 
+                latitude = ?, 
+                longitude = ?, 
+                location_notes = ?,
+                location_updated_at = NOW()
+                WHERE order_id = ?");
+            
+            $result = $stmt->execute([$latitude, $longitude, $location_notes, $order_id]);
+            
+            if ($result) {
+                // Record this update in the status history
+                $this->recordStatusHistory($order_id, 'shipped', 'Location updated: ' . $location_notes);
+            }
+            
+            return $result;
+        } catch(PDOException $e) {
+            error_log("Error updating order location: " . $e->getMessage());
+            return false;
+        }
+    }
 }
 
 $orderDelivery = new OrderDelivery($db);
@@ -544,6 +640,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             
             if ($orderDelivery->updateOrderStatus($order_id, $status, $notes)) {
                 $_SESSION['success_message'] = "Order status updated successfully!";
+            }
+        }
+        
+        if (isset($_POST['update_location'])) {
+            $order_id = (int)$_POST['order_id'];
+            $latitude = (float)$_POST['latitude'];
+            $longitude = (float)$_POST['longitude'];
+            $location_notes = $_POST['location_notes'] ?? null;
+            
+            if ($orderDelivery->updateOrderLocation($order_id, $latitude, $longitude, $location_notes)) {
+                $_SESSION['success_message'] = "Order location updated successfully!";
             }
         }
         
@@ -1056,9 +1163,7 @@ $time_slot_map = [
         
         .order-item-price {
             font-weight: 600;
-            color: var(--dark-color);
-            text-align: right;
-            min-width: 100px;
+            color: #2c3e50;
         }
         
         .order-summary {
@@ -1232,7 +1337,292 @@ $time_slot_map = [
                 gap: 10px;
             }
         }
+
+        /* Product Reviews Styles */
+        .product-reviews {
+            margin-top: 2rem;
+            padding: 1.5rem;
+            background: #fff;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+        }
+
+        .product-reviews h4 {
+            color: #2c3e50;
+            margin-bottom: 1.5rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .product-reviews h4 i {
+            color: #f1c40f;
+        }
+
+        .no-reviews {
+            color: #7f8c8d;
+            font-style: italic;
+            text-align: center;
+            padding: 1rem;
+        }
+
+        .product-review-group {
+            margin-bottom: 2rem;
+            border-bottom: 1px solid #ecf0f1;
+            padding-bottom: 1.5rem;
+        }
+
+        .product-review-group:last-child {
+            border-bottom: none;
+            margin-bottom: 0;
+            padding-bottom: 0;
+        }
+
+        .product-review-header {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+            margin-bottom: 1rem;
+        }
+
+        .product-review-image {
+            width: 60px;
+            height: 60px;
+            object-fit: cover;
+            border-radius: 4px;
+        }
+
+        .product-review-header h5 {
+            margin: 0;
+            color: #2c3e50;
+            font-size: 1.1rem;
+        }
+
+        .review-card {
+            background: #f8f9fa;
+            border-radius: 6px;
+            padding: 1rem;
+            margin-bottom: 1rem;
+        }
+
+        .review-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 0.75rem;
+        }
+
+        .reviewer-info {
+            display: flex;
+            flex-direction: column;
+        }
+
+        .reviewer-name {
+            font-weight: 600;
+            color: #2c3e50;
+        }
+
+        .review-date {
+            font-size: 0.85rem;
+            color: #7f8c8d;
+        }
+
+        .review-rating {
+            color: #f1c40f;
+        }
+
+        .review-title {
+            color: #2c3e50;
+            margin: 0.5rem 0;
+            font-size: 1rem;
+        }
+
+        .review-content {
+            color: #34495e;
+            line-height: 1.5;
+            margin: 0.75rem 0;
+        }
+
+        .review-footer {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-top: 1rem;
+            padding-top: 0.75rem;
+            border-top: 1px solid #ecf0f1;
+        }
+
+        .review-status {
+            font-size: 0.85rem;
+            padding: 0.25rem 0.75rem;
+            border-radius: 4px;
+        }
+
+        .review-status.pending {
+            background: #fff3cd;
+            color: #856404;
+        }
+
+        .review-status.approved {
+            background: #d4edda;
+            color: #155724;
+        }
+
+        .review-actions {
+            display: flex;
+            gap: 0.5rem;
+        }
+
+        .review-actions .btn {
+            padding: 0.25rem 0.5rem;
+            font-size: 0.85rem;
+        }
+
+        .review-actions .btn i {
+            margin-right: 0.25rem;
+        }
+
+        /* Order Tracking Map Styles */
+        .order-tracking-map {
+            margin-top: 2rem;
+            padding: 1.5rem;
+            background: #fff;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+        }
+
+        .order-tracking-map h4 {
+            color: #2c3e50;
+            margin-bottom: 1.5rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .order-tracking-map h4 i {
+            color: #e74c3c;
+        }
+
+        .map-container {
+            margin-bottom: 1rem;
+            border: 1px solid #ecf0f1;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+
+        .map-controls {
+            background: #f8f9fa;
+            padding: 1rem;
+            border-radius: 6px;
+        }
+
+        .map-controls .form-group {
+            margin-bottom: 1rem;
+        }
+
+        .map-controls label {
+            font-weight: 500;
+            color: #2c3e50;
+            margin-bottom: 0.5rem;
+        }
+
+        .map-controls textarea {
+            resize: vertical;
+            min-height: 60px;
+        }
+
+        .map-controls .btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        
+        .price-breakdown {
+            display: inline-block;
+            margin-left: 5px;
+            color: var(--text-muted);
+            font-size: 0.9em;
+        }
+        
+        .order-item-meta {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            color: var(--text-muted);
+            font-size: 0.9em;
+        }
+        
+        .order-summary-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 10px 0;
+            border-bottom: 1px solid var(--border-color);
+        }
+        
+        .order-summary-row.total {
+            font-weight: bold;
+            font-size: 1.1em;
+            border-bottom: none;
+            margin-top: 10px;
+        }
     </style>
+    <!-- Add this before the closing </head> tag -->
+    <!-- PASTE YOUR GOOGLE MAPS API KEY BELOW (replace YOUR_GOOGLE_MAPS_API_KEY) -->
+    <script src="https://maps.googleapis.com/maps/api/js?key=AIzaSyAgLyBmsBfFsoW7zzmIS8Aj-XRk2-mwYd8&callback=initMap" async defer></script>
+    <script>
+        // Replace YOUR_GOOGLE_MAPS_API_KEY above with your actual Google Maps API key
+        // To get an API key:
+        // 1. Go to https://console.cloud.google.com/
+        // 2. Create a new project or select an existing one
+        // 3. Enable the Maps JavaScript API
+        // 4. Create credentials (API key)
+        // 5. Restrict the API key to your domain for security
+        // 6. Replace YOUR_GOOGLE_MAPS_API_KEY with your actual key
+        
+        function initMap() {
+            // Default to Bohol, Philippines if no coordinates are set
+            const defaultLocation = { lat: 9.8499, lng: 124.1435 };
+            const orderLocation = {
+                lat: <?php echo isset($order['latitude']) ? $order['latitude'] : '9.8499'; ?>,
+                lng: <?php echo isset($order['longitude']) ? $order['longitude'] : '124.1435'; ?>
+            };
+            
+            const map = new google.maps.Map(document.getElementById('orderMap'), {
+                zoom: 12,
+                center: orderLocation,
+                restriction: {
+                    latLngBounds: {
+                        north: 10.5,
+                        south: 9.0,
+                        east: 125.0,
+                        west: 123.0
+                    },
+                    strictBounds: true
+                }
+            });
+            
+            const marker = new google.maps.Marker({
+                position: orderLocation,
+                map: map,
+                draggable: true,
+                title: 'Order Location'
+            });
+            
+            // Update hidden inputs when marker is dragged
+            marker.addListener('dragend', function() {
+                const position = marker.getPosition();
+                document.getElementById('latitude').value = position.lat();
+                document.getElementById('longitude').value = position.lng();
+            });
+            
+            // Add click listener to map
+            map.addListener('click', function(event) {
+                marker.setPosition(event.latLng);
+                document.getElementById('latitude').value = event.latLng.lat();
+                document.getElementById('longitude').value = event.latLng.lng();
+            });
+        }
+    </script>
 </head>
 <body>
     <!-- Sidebar -->
@@ -1369,7 +1759,11 @@ $time_slot_map = [
                                 <div class="order-item-name"><?php echo htmlspecialchars($item['name']); ?></div>
                                 <div class="order-item-meta">
                                     Size: <?php echo htmlspecialchars($item['size'] ?? 'N/A'); ?>,
-                                    Quantity: <?php echo $item['quantity']; ?> × ₱<?php echo number_format($item['unit_price'], 2); ?>
+                                    Quantity: <?php echo $item['quantity']; ?> × 
+                                    <span class="price-breakdown">
+                                        Original Price: ₱<?php echo number_format($item['unit_price'], 2); ?> +
+                                        Shipping: ₱<?php echo number_format(50, 2); ?>
+                                    </span>
                                 </div>
                             </div>
                             <div class="order-item-price">
@@ -1379,14 +1773,87 @@ $time_slot_map = [
                     <?php endforeach; ?>
                 </div>
                 
+                <!-- Product Reviews Section -->
+                <div class="product-reviews">
+                    <h4><i class="fas fa-star"></i> Product Reviews</h4>
+                    <?php 
+                    // Get reviews for this order
+                    $order_reviews = $orderDelivery->getOrderReviews($order['order_id']);
+                    
+                    if (empty($order_reviews)): 
+                    ?>
+                        <p class="no-reviews">No reviews submitted for products in this order yet.</p>
+                    <?php else: ?>
+                        <?php foreach ($order_reviews as $product_id => $review_data): ?>
+                            <div class="product-review-group">
+                                <div class="product-review-header">
+                                    <img src="../assets/images/products/<?php echo htmlspecialchars($review_data['product']['product_image']); ?>" 
+                                         alt="<?php echo htmlspecialchars($review_data['product']['product_name']); ?>" 
+                                         class="product-review-image">
+                                    <h5><?php echo htmlspecialchars($review_data['product']['product_name']); ?></h5>
+                                </div>
+                                
+                                <?php foreach ($review_data['reviews'] as $review): ?>
+                                    <div class="review-card">
+                                        <div class="review-header">
+                                            <div class="reviewer-info">
+                                                <span class="reviewer-name"><?php echo htmlspecialchars($review['firstname'] . ' ' . $review['lastname']); ?></span>
+                                                <span class="review-date"><?php echo date('M d, Y', strtotime($review['created_at'])); ?></span>
+                                            </div>
+                                            <div class="review-rating">
+                                                <?php for ($i = 1; $i <= 5; $i++): ?>
+                                                    <i class="fas fa-star<?php echo $i <= $review['rating'] ? '' : '-o'; ?>"></i>
+                                                <?php endfor; ?>
+                                            </div>
+                                        </div>
+                                        
+                                        <?php if (!empty($review['title'])): ?>
+                                            <h6 class="review-title"><?php echo htmlspecialchars($review['title']); ?></h6>
+                                        <?php endif; ?>
+                                        
+                                        <div class="review-content">
+                                            <?php echo nl2br(htmlspecialchars($review['review'])); ?>
+                                        </div>
+                                        
+                                        <div class="review-footer">
+                                            <span class="review-status <?php echo $review['is_approved'] ? 'approved' : 'pending'; ?>">
+                                                <?php echo $review['is_approved'] ? 'Approved' : 'Pending Approval'; ?>
+                                            </span>
+                                            
+                                            <div class="review-actions">
+                                                <?php if (!$review['is_approved']): ?>
+                                                    <form method="POST" style="display: inline;">
+                                                        <input type="hidden" name="review_id" value="<?php echo $review['review_id']; ?>">
+                                                        <button type="submit" name="approve_review" class="btn btn-sm btn-success">
+                                                            <i class="fas fa-check"></i> Approve
+                                                        </button>
+                                                    </form>
+                                                <?php endif; ?>
+                                                
+                                                <form method="POST" style="display: inline;">
+                                                    <input type="hidden" name="review_id" value="<?php echo $review['review_id']; ?>">
+                                                    <button type="submit" name="delete_review" class="btn btn-sm btn-danger" 
+                                                            onclick="return confirm('Are you sure you want to delete this review?');">
+                                                        <i class="fas fa-trash"></i> Delete
+                                                    </button>
+                                                </form>
+                                            </div>
+                                        </div>
+                                    </div>
+                                <?php endforeach; ?>
+                            </div>
+                        <?php endforeach; ?>
+                    <?php endif; ?>
+                </div>
+                
                 <div class="order-summary">
                     <div class="order-summary-row">
                         <span>Subtotal:</span>
-                        <span>₱<?php echo number_format($order['total_amount'] - 500, 2); ?></span>
+                        <span>₱<?php echo number_format($order['total_amount'] - ($shipping = 50 * array_sum(array_column($order['items'], 'quantity'))), 2); ?></span>
                     </div>
                     <div class="order-summary-row">
                         <span>Shipping:</span>
-                        <span>₱500.00</span>
+                        <span>₱<?php echo number_format($shipping, 2); ?></span>
                     </div>
                     <div class="order-summary-row total">
                         <span>Total:</span>
@@ -1567,6 +2034,31 @@ $time_slot_map = [
                         <?php endif; ?>
                     </div>
                 </div>
+                
+                <!-- Order Tracking Map -->
+                <?php if ($order['status'] == 'shipped'): ?>
+                <div class="order-tracking-map">
+                    <h4><i class="fas fa-map-marker-alt"></i> Order Location</h4>
+                    <div class="map-container">
+                        <div id="orderMap" style="height: 400px; width: 100%; border-radius: 8px;"></div>
+                    </div>
+                    <div class="map-controls mt-3">
+                        <form method="POST" id="updateLocationForm">
+                            <input type="hidden" name="order_id" value="<?php echo $order['order_id']; ?>">
+                            <input type="hidden" name="latitude" id="latitude" value="<?php echo $order['latitude'] ?? ''; ?>">
+                            <input type="hidden" name="longitude" id="longitude" value="<?php echo $order['longitude'] ?? ''; ?>">
+                            <div class="form-group">
+                                <label for="location_notes">Location Notes</label>
+                                <textarea id="location_notes" name="location_notes" class="form-control" rows="2" 
+                                    placeholder="Add notes about the current location..."><?php echo htmlspecialchars($order['location_notes'] ?? ''); ?></textarea>
+                            </div>
+                            <button type="submit" name="update_location" class="btn btn-primary">
+                                <i class="fas fa-save"></i> Update Location
+                            </button>
+                        </form>
+                    </div>
+                </div>
+                <?php endif; ?>
                 
                 <div style="margin-top: 20px;">
                     <a href="orders.php" class="btn btn-primary">

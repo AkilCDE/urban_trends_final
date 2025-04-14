@@ -17,13 +17,13 @@ try {
 session_start();
 
 // Include all necessary classes
-require_once 'Auth.php';
-require_once 'ProductVariation.php';
-require_once 'Promotion.php';
-require_once 'PaymentProcessor.php';
-require_once 'ShippingTracker.php';
-require_once 'SupportSystem.php';
-require_once 'ReviewSystem.php';
+require_once 'auth.php';
+require_once 'product_variations.php';
+require_once 'promo_codes.php';
+require_once 'payment_processor.php';
+require_once 'shipping_tracker.php';
+require_once 'support_system.php';
+require_once 'review_system.php';
 
 // Security headers
 header("X-Frame-Options: DENY");

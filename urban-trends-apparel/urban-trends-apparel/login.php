@@ -89,195 +89,272 @@ if ($auth->isLoggedIn()) {
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Urban Trends Apparel - Login</title>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <style>
         :root {
-            --primary-color: rgb(228, 6, 80);
-            --secondary-color: rgb(200, 0, 60);
+            --primary-color: #1a1a1a;
+            --secondary-color: #121212;
+            --accent-color: #ff6b6b;
             --light-color: #f8f9fa;
-            --dark-color: #333;
-            --text-color: #555;
+            --dark-color: #0d0d0d;
+            --text-color: #e0e0e0;
+            --text-muted: #b0b0b0;
+            --success-color: #4bb543;
             --error-color: #ff3333;
-            --error-bg: #ffeeee;
+            --warning-color: #ffcc00;
+            --border-radius: 8px;
+            --box-shadow: 0 10px 20px rgba(0, 0, 0, 0.3);
+            --transition: all 0.3s ease;
         }
-        
+
         * {
             margin: 0;
             padding: 0;
             box-sizing: border-box;
-            font-family: 'Arial', sans-serif;
+            font-family: 'Poppins', sans-serif;
         }
-        
+
         body {
-            background-color: var(--primary-color);
+            min-height: 100vh;
+            background: linear-gradient(135deg, var(--primary-color), var(--secondary-color));
             display: flex;
             justify-content: center;
             align-items: center;
-            min-height: 100vh;
             padding: 20px;
+            position: relative;
+            overflow: hidden;
         }
-        
+
+        /* Animated Background */
+        .background-animation {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 1;
+            opacity: 0.1;
+        }
+
+        .background-animation::before {
+            content: '';
+            position: absolute;
+            width: 200%;
+            height: 200%;
+            background: url('assets/images/pattern.png') repeat;
+            animation: backgroundMove 20s linear infinite;
+        }
+
+        @keyframes backgroundMove {
+            0% { transform: translate(0, 0); }
+            100% { transform: translate(-50%, -50%); }
+        }
+
         .login-container {
-            background-color: white;
+            background: rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(10px);
             padding: 40px;
-            border-radius: 10px;
-            box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+            border-radius: var(--border-radius);
+            box-shadow: var(--box-shadow);
             width: 100%;
             max-width: 400px;
-            text-align: center;
-            transition: all 0.3s ease;
+            position: relative;
+            z-index: 2;
+            transform: translateY(20px);
+            opacity: 0;
+            animation: slideUp 0.5s ease forwards;
         }
-        
+
+        @keyframes slideUp {
+            to {
+                transform: translateY(0);
+                opacity: 1;
+            }
+        }
+
         .logo {
-            margin-bottom: 20px;
+            text-align: center;
+            margin-bottom: 30px;
+            animation: fadeIn 0.5s ease 0.3s forwards;
+            opacity: 0;
         }
-        
+
+        @keyframes fadeIn {
+            to { opacity: 1; }
+        }
+
         .logo h1 {
-            color: var(--dark-color);
-            font-size: 28px;
-            margin-bottom: 5px;
+            color: var(--accent-color);
+            font-size: 2rem;
+            margin-bottom: 10px;
+            text-transform: uppercase;
+            letter-spacing: 2px;
         }
-        
+
         .logo p {
-            color: var(--text-color);
-            font-size: 14px;
+            color: var(--text-muted);
+            font-size: 0.9rem;
         }
-        
+
         .error-message {
+            background: rgba(255, 51, 51, 0.1);
+            border: 1px solid var(--error-color);
             color: var(--error-color);
-            background-color: var(--error-bg);
-            padding: 12px;
-            border-radius: 5px;
+            padding: 15px;
+            border-radius: var(--border-radius);
             margin-bottom: 20px;
-            font-size: 14px;
             display: none;
+            animation: shake 0.5s ease;
         }
-        
+
         .error-message.show {
             display: block;
         }
-        
+
+        @keyframes shake {
+            0%, 100% { transform: translateX(0); }
+            25% { transform: translateX(-10px); }
+            75% { transform: translateX(10px); }
+        }
+
         .input-group {
             margin-bottom: 20px;
-            text-align: left;
             position: relative;
+            animation: fadeIn 0.5s ease 0.5s forwards;
+            opacity: 0;
         }
-        
+
         .input-group label {
             display: block;
+            color: var(--text-color);
             margin-bottom: 8px;
-            color: var(--dark-color);
-            font-size: 14px;
-            font-weight: 500;
+            font-size: 0.9rem;
         }
-        
+
         .input-group input {
             width: 100%;
-            padding: 12px 15px;
-            border: 1px solid #ddd;
-            border-radius: 5px;
-            font-size: 14px;
-            transition: border-color 0.3s;
+            padding: 12px;
+            background: rgba(255, 255, 255, 0.1);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            border-radius: var(--border-radius);
+            color: var(--text-color);
+            font-size: 1rem;
+            transition: var(--transition);
         }
-        
+
         .input-group input:focus {
             outline: none;
-            border-color: var(--primary-color);
-            box-shadow: 0 0 0 3px rgba(228, 6, 80, 0.1);
+            border-color: var(--accent-color);
+            box-shadow: 0 0 0 3px rgba(255, 107, 107, 0.2);
         }
-        
-        .input-group .password-toggle {
+
+        .password-toggle {
             position: absolute;
-            right: 15px;
-            top: 38px;
+            right: 12px;
+            top: 40px;
+            color: var(--text-muted);
             cursor: pointer;
-            color: var(--text-color);
+            transition: var(--transition);
         }
-        
+
+        .password-toggle:hover {
+            color: var(--accent-color);
+        }
+
         .options {
             display: flex;
             justify-content: space-between;
             align-items: center;
-            margin-bottom: 25px;
-            font-size: 14px;
+            margin-bottom: 20px;
+            animation: fadeIn 0.5s ease 0.7s forwards;
+            opacity: 0;
         }
-        
+
         .remember-me {
             display: flex;
             align-items: center;
+            gap: 8px;
+            color: var(--text-muted);
+            font-size: 0.9rem;
         }
-        
-        .remember-me input {
-            margin-right: 8px;
-            accent-color: var(--primary-color);
-        }
-        
+
         .forgot-password a {
-            color: var(--primary-color);
+            color: var(--accent-color);
             text-decoration: none;
-            transition: color 0.3s;
+            font-size: 0.9rem;
+            transition: var(--transition);
         }
-        
+
         .forgot-password a:hover {
-            color: var(--secondary-color);
+            color: #ff5252;
             text-decoration: underline;
         }
-        
+
         .btn {
             width: 100%;
-            padding: 14px;
-            background-color: var(--primary-color);
+            padding: 12px;
+            background: var(--accent-color);
             color: white;
             border: none;
-            border-radius: 5px;
-            font-size: 16px;
-            font-weight: 600;
+            border-radius: var(--border-radius);
+            font-size: 1rem;
+            font-weight: 500;
             cursor: pointer;
-            transition: background-color 0.3s;
-            margin-bottom: 20px;
+            transition: var(--transition);
+            animation: fadeIn 0.5s ease 0.9s forwards;
+            opacity: 0;
         }
-        
+
         .btn:hover {
-            background-color: var(--secondary-color);
+            background: #ff5252;
+            transform: translateY(-2px);
         }
-        
+
         .register-link {
-            color: var(--text-color);
-            font-size: 14px;
+            text-align: center;
+            margin-top: 20px;
+            color: var(--text-muted);
+            font-size: 0.9rem;
+            animation: fadeIn 0.5s ease 1.1s forwards;
+            opacity: 0;
         }
-        
+
         .register-link a {
-            color: var(--primary-color);
-            font-weight: 600;
+            color: var(--accent-color);
             text-decoration: none;
-            transition: color 0.3s;
+            font-weight: 500;
+            transition: var(--transition);
         }
-        
+
         .register-link a:hover {
-            color: var(--secondary-color);
+            color: #ff5252;
             text-decoration: underline;
         }
-        
+
+        /* Responsive Design */
         @media (max-width: 480px) {
             .login-container {
                 padding: 30px 20px;
             }
-            
+
+            .logo h1 {
+                font-size: 1.5rem;
+            }
+
             .options {
                 flex-direction: column;
-                align-items: flex-start;
                 gap: 10px;
-            }
-            
-            .forgot-password {
-                align-self: flex-end;
+                align-items: flex-start;
             }
         }
     </style>
 </head>
 <body>
+    <div class="background-animation"></div>
+    
     <div class="login-container">
         <div class="logo">
-            <h1>Urban Trends Apparel</h1>
+            <h1><i class="fas fa-tshirt"></i> Urban Trends</h1>
             <p>Login to your account</p>
         </div>
         
@@ -317,39 +394,26 @@ if ($auth->isLoggedIn()) {
     </div>
 
     <script>
-        // Toggle password visibility
-        const togglePassword = document.getElementById('togglePassword');
-        const passwordInput = document.getElementById('password');
-        
-        togglePassword.addEventListener('click', function() {
+        // Password visibility toggle
+        document.getElementById('togglePassword').addEventListener('click', function() {
+            const passwordInput = document.getElementById('password');
             const type = passwordInput.getAttribute('type') === 'password' ? 'text' : 'password';
             passwordInput.setAttribute('type', type);
+            this.classList.toggle('fa-eye');
             this.classList.toggle('fa-eye-slash');
         });
-        
+
         // Form validation
-        const loginForm = document.getElementById('loginForm');
-        const errorMessage = document.querySelector('.error-message');
-        
-        loginForm.addEventListener('submit', function(e) {
+        document.getElementById('loginForm').addEventListener('submit', function(e) {
             const email = document.getElementById('email').value.trim();
             const password = document.getElementById('password').value.trim();
             
             if (!email || !password) {
                 e.preventDefault();
+                const errorMessage = document.querySelector('.error-message');
                 errorMessage.textContent = 'Please fill in all fields';
                 errorMessage.classList.add('show');
             }
-        });
-        
-        // Hide error message when user starts typing
-        const inputs = document.querySelectorAll('input');
-        inputs.forEach(input => {
-            input.addEventListener('input', () => {
-                if (errorMessage.classList.contains('show')) {
-                    errorMessage.classList.remove('show');
-                }
-            });
         });
     </script>
 </body>

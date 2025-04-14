@@ -3107,5 +3107,6 @@ $review_product = $review_product_id ? getProductForReview($db, $review_product_
             });
         });
     </script>
+    <script src="https://maps.googleapis.com/maps/api/js?key=YOUR_ACTUAL_API_KEY_HERE&callback=initMap" async defer></script>
 </body>
 </html>
