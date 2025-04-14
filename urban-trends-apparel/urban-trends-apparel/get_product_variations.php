@@ -1,19 +1,5 @@
 <?php
-// Database configuration
-define('DB_HOST', 'localhost');
-define('DB_USER', 'root');
-define('DB_PASS', '');
-define('DB_NAME', 'urban_trends');
-
-header('Content-Type: application/json');
-
-try {
-    $db = new PDO("mysql:host=".DB_HOST.";dbname=".DB_NAME, DB_USER, DB_PASS);
-    $db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-} catch(PDOException $e) {
-    echo json_encode(['error' => 'Database connection failed']);
-    exit;
-}
+require_once 'Database/datab.php';
 
 if (!isset($_GET['id']) || !is_numeric($_GET['id'])) {
     echo json_encode(['error' => 'Invalid product ID']);

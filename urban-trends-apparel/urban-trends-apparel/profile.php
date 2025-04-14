@@ -1,17 +1,5 @@
 <?php
-// Database configuration
-define('DB_HOST', 'localhost');
-define('DB_USER', 'root');
-define('DB_PASS', '');
-define('DB_NAME', 'urban_trends');
-
-// Create database connection
-try {
-    $db = new PDO("mysql:host=".DB_HOST.";dbname=".DB_NAME, DB_USER, DB_PASS);
-    $db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-} catch(PDOException $e) {
-    die("Connection failed: " . $e->getMessage());
-}
+require_once 'Database/datab.php';
 
 // Start session
 session_start();
@@ -3107,6 +3095,6 @@ $review_product = $review_product_id ? getProductForReview($db, $review_product_
             });
         });
     </script>
-    <script src="https://maps.googleapis.com/maps/api/js?key=YOUR_ACTUAL_API_KEY_HERE&callback=initMap" async defer></script>
+    <script src="https://maps.googleapis.com/maps/api/js?key=AIzaSyAgLyBmsBfFsoW7zzmIS8Aj-XRk2-mwYd8&callback=initMap" async defer></script>
 </body>
 </html>

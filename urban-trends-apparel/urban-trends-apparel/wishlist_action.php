@@ -1,19 +1,7 @@
 <?php
 session_start();
 
-// Database configuration
-define('DB_HOST', 'localhost');
-define('DB_USER', 'root');
-define('DB_PASS', '');
-define('DB_NAME', 'urban_trends');
-
-// Create database connection
-try {
-    $db = new PDO("mysql:host=".DB_HOST.";dbname=".DB_NAME, DB_USER, DB_PASS);
-    $db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-} catch(PDOException $e) {
-    die(json_encode(['success' => false, 'message' => 'Database connection failed']));
-}
+require_once 'Database/datab.php';
 
 if (!isset($_SESSION['user_id'])) {
     die(json_encode(['success' => false, 'message' => 'Please login first']));
